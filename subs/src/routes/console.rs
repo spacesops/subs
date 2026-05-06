@@ -84,7 +84,12 @@ pub async fn proxy_spaced(
         .as_ref()
         .ok_or_else(|| json_error(StatusCode::SERVICE_UNAVAILABLE, "Spaced RPC URL not configured"))?;
 
-    proxy_rpc_call(rpc_url, &request, Some(("user", "pass"))).await
+    let auth = state
+        .spaced_rpc_user
+        .as_deref()
+        .map(|user| (user, state.spaced_rpc_password.as_deref().unwrap_or("")));
+
+    proxy_rpc_call(rpc_url, &request, auth).await
 }
 
 /// POST /rpc/bitcoin - Proxy RPC call to bitcoind (test-rig only)

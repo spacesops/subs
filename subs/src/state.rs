@@ -16,6 +16,10 @@ pub struct AppState {
     pub config: Arc<ConfigStore>,
     /// Spaced RPC URL for the console
     pub spaced_rpc_url: Option<String>,
+    /// Spaced RPC username for proxied calls
+    pub spaced_rpc_user: Option<String>,
+    /// Spaced RPC password for proxied calls
+    pub spaced_rpc_password: Option<String>,
     /// Bitcoin RPC URL (only available in test-rig mode)
     pub bitcoin_rpc_url: Option<String>,
     /// Certrelay URL (only available in test-rig mode)
@@ -31,12 +35,16 @@ impl AppState {
         operator: Operator,
         config: ConfigStore,
         spaced_rpc_url: Option<String>,
+        spaced_rpc_user: Option<String>,
+        spaced_rpc_password: Option<String>,
         _bitcoin_rpc_url: Option<String>,
     ) -> Self {
         Self {
             operator: Arc::new(operator),
             config: Arc::new(config),
             spaced_rpc_url,
+            spaced_rpc_user,
+            spaced_rpc_password,
             bitcoin_rpc_url: None,
             certrelay_url: None,
         }
@@ -47,12 +55,16 @@ impl AppState {
         operator: Operator,
         config: ConfigStore,
         spaced_rpc_url: Option<String>,
+        spaced_rpc_user: Option<String>,
+        spaced_rpc_password: Option<String>,
         bitcoin_rpc_url: Option<String>,
     ) -> Self {
         Self {
             operator: Arc::new(operator),
             config: Arc::new(config),
             spaced_rpc_url,
+            spaced_rpc_user,
+            spaced_rpc_password,
             bitcoin_rpc_url,
             certrelay_url: None,
             test_rig: None,
@@ -64,6 +76,8 @@ impl AppState {
         operator: Operator,
         config: ConfigStore,
         spaced_rpc_url: Option<String>,
+        spaced_rpc_user: Option<String>,
+        spaced_rpc_password: Option<String>,
         bitcoin_rpc_url: Option<String>,
         certrelay_url: Option<String>,
         test_rig: Arc<TestRigHandle>,
@@ -72,6 +86,8 @@ impl AppState {
             operator: Arc::new(operator),
             config: Arc::new(config),
             spaced_rpc_url,
+            spaced_rpc_user,
+            spaced_rpc_password,
             bitcoin_rpc_url,
             certrelay_url,
             test_rig: Some(test_rig),

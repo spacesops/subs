@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "subsd=info,tower_http=debug".into()),
+                .unwrap_or_else(|_| "subs=info,tower_http=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -150,7 +150,16 @@ async fn run_normal(cli: Cli) -> Result<()> {
     operator.load_all_spaces().await?;
 
     // Build app state and run server
-    run_server(operator, config, cli.port, Some(rpc_url.clone()), None).await
+    run_server(
+        operator,
+        config,
+        cli.port,
+        Some(rpc_url.clone()),
+        cli.rpc_user.clone(),
+        cli.rpc_password.clone(),
+        None,
+    )
+    .await
 }
 
 #[cfg(feature = "test-rig")]
@@ -226,10 +235,19 @@ async fn run_server(
     config: ConfigStore,
     port: u16,
     spaced_rpc_url: Option<String>,
+    spaced_rpc_user: Option<String>,
+    spaced_rpc_password: Option<String>,
     bitcoin_rpc_url: Option<String>,
 ) -> Result<()> {
     // Build app state
-    let state = AppState::with_rpc_urls(operator, config, spaced_rpc_url, bitcoin_rpc_url);
+    let state = AppState::with_rpc_urls(
+        operator,
+        config,
+        spaced_rpc_url,
+        spaced_rpc_user,
+        spaced_rpc_password,
+        bitcoin_rpc_url,
+    );
     run_server_inner(state, port).await
 }
 
@@ -244,7 +262,16 @@ async fn run_server_with_testrig(
     test_rig: std::sync::Arc<testrig::TestRigHandle>,
 ) -> Result<()> {
     // Build app state with test rig
-    let state = AppState::with_test_rig(operator, config, Some(spaced_rpc_url), Some(bitcoin_rpc_url), Some(certrelay_url), test_rig);
+    let state = AppState::with_test_rig(
+        operator,
+        config,
+        Some(spaced_rpc_url),
+        Some("user".to_string()),
+        Some("pass".to_string()),
+        Some(bitcoin_rpc_url),
+        Some(certrelay_url),
+        test_rig,
+    );
     run_server_inner(state, port).await
 }
 
@@ -266,6 +293,8 @@ async fn run_server_inner(state: AppState, port: u16) -> Result<()> {
     // Start server
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("Starting server on http://{}", addr);
+    tracing::info!("Server URL: http://127.0.0.1:{}", port);
+    println!("Server URL: http://127.0.0.1:{} (port {})", port, port);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
