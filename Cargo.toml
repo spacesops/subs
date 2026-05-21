@@ -1,6 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["core", "prover", "types", "subs", "examples/registry-server"]
+members = [
+    "config-origins",
+    "core",
+    "prover",
+    "types",
+    "subs",
+    "examples/registry-server",
+]
 
 [workspace.dependencies]
 # Internal crates
@@ -29,7 +36,8 @@ serde_json = "1.0"
 anyhow = "1.0"
 hex = "0.4"
 borsh = { version = "1.5", default-features = false, features = ["derive"] }
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+dotenvy = "0.15"
 tokio = { version = "1" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -15,10 +15,12 @@ path = "src/main.rs"
 risc0-zkvm = { workspace = true, features = ["prove"] }
 libveritas = { workspace = true }
 libveritas_zk = { workspace = true }
+config-origins = { path = "../config-origins" }
 subs-types = { workspace = true }
 spacedb = { workspace = true }
 
 clap = { workspace = true }
+dotenvy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

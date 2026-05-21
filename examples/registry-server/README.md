@@ -23,8 +23,10 @@ This architecture keeps subsd private (it holds wallet keys) while the registry 
 # Build
 cargo build --release -p registry-server
 
-# Run
+# Run (CLI or environment)
 registry-server --port 8080
+# REGISTRY_SERVER_PORT=8080 registry-server
+# Loads .env from the current directory if present
 ```
 
 Then configure subsd to use this registry:

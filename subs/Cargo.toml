@@ -10,6 +10,7 @@ name = "subs"
 path = "src/main.rs"
 
 [dependencies]
+config-origins = { path = "../config-origins" }
 subs-core = { workspace = true }
 subs-types = { workspace = true }
 
@@ -20,6 +21,7 @@ tower-http = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 clap = { workspace = true }
+dotenvy = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }

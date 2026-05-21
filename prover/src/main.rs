@@ -21,7 +21,7 @@ use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use subs_prover::Prover;
 use subs_types::{CompressInput, ProvingRequest};
 
@@ -33,11 +33,11 @@ use subs_types::{CompressInput, ProvingRequest};
 )]
 struct Cli {
     /// Run as an HTTP server that accepts proving requests
-    #[arg(long)]
+    #[arg(long, env = "SUBS_PROVER_SERVER")]
     server: bool,
 
     /// Server port (for --server mode)
-    #[arg(long, default_value = "8888")]
+    #[arg(long, env = "SUBS_PROVER_PORT", default_value = "8888")]
     server_port: u16,
 
     #[command(subcommand)]
@@ -49,55 +49,79 @@ enum Commands {
     /// Prove a ProvingRequest (Step or Fold)
     Prove {
         /// Input file (JSON ProvingRequest). If not provided, reads from stdin.
-        #[arg(short, long)]
+        #[arg(short, long, env = "SUBS_PROVER_INPUT")]
         input: Option<PathBuf>,
         /// Output file for receipt. If not provided, writes to stdout.
-        #[arg(short, long)]
+        #[arg(short, long, env = "SUBS_PROVER_OUTPUT")]
         output: Option<PathBuf>,
     },
     /// Compress a STARK proof to SNARK (Groth16)
     Compress {
         /// Input file (JSON CompressInput). If not provided, reads from stdin.
-        #[arg(short, long)]
+        #[arg(short, long, env = "SUBS_PROVER_INPUT")]
         input: Option<PathBuf>,
         /// Output file for receipt. If not provided, writes to stdout.
-        #[arg(short, long)]
+        #[arg(short, long, env = "SUBS_PROVER_OUTPUT")]
         output: Option<PathBuf>,
     },
     /// Benchmark: estimate proving cost for inserting handles into a tree
     Bench {
         /// Number of existing handles in the tree
-        #[arg(long, default_value = "10000")]
+        #[arg(long, env = "SUBS_PROVER_BENCH_EXISTING", default_value = "10000")]
         existing: usize,
         /// Number of new handles to insert
-        #[arg(long, default_value = "100")]
+        #[arg(long, env = "SUBS_PROVER_BENCH_INSERT", default_value = "100")]
         insert: usize,
     },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let dotenv = subs_prover::env::load_dotenv("SUBS_PROVER_ENV_FILE");
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
     if cli.server {
+        subs_prover::env::log_server_startup(&matches, &dotenv, cli.server, cli.server_port);
         subs_prover::server::run_server(cli.server_port).await?;
         return Ok(());
     }
 
     match cli.cmd {
         Some(Commands::Prove { input, output }) => {
+            if let Some((_, sub)) = matches.subcommand() {
+                subs_prover::env::log_subcommand_startup(
+                    sub,
+                    &dotenv,
+                    "prove",
+                    input.as_deref(),
+                    output.as_deref(),
+                );
+            }
             let input_data = read_input(input)?;
             let request: ProvingRequest = serde_json::from_slice(&input_data)?;
             let receipt = prove(&request)?;
             write_output(output, &receipt)?;
         }
         Some(Commands::Compress { input, output }) => {
+            if let Some((_, sub)) = matches.subcommand() {
+                subs_prover::env::log_subcommand_startup(
+                    sub,
+                    &dotenv,
+                    "compress",
+                    input.as_deref(),
+                    output.as_deref(),
+                );
+            }
             let input_data = read_input(input)?;
             let compress_input: CompressInput = serde_json::from_slice(&input_data)?;
             let receipt = compress(&compress_input)?;
             write_output(output, &receipt)?;
         }
         Some(Commands::Bench { existing, insert }) => {
+            if let Some((_, sub)) = matches.subcommand() {
+                subs_prover::env::log_bench_startup(&dotenv, sub, existing, insert);
+            }
             run_bench(existing, insert)?;
         }
         None => {

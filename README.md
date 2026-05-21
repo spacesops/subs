@@ -51,6 +51,101 @@ cargo install --path prover
 
 For operators, use `--features cuda` on `subs-prover` for nvidia machines to enable GPU acceleration.
 
+## Configuration
+
+Each binary accepts the same settings via **CLI flags**, **environment variables**, or a **`.env` file** in the current working directory. Command-line flags override environment variables.
+
+Load a custom env file path with:
+
+- `subs`: `SUBS_ENV_FILE=/path/to/subs.env`
+- `subs-prover`: `SUBS_PROVER_ENV_FILE=/path/to/prover.env`
+- `registry-server`: `REGISTRY_SERVER_ENV_FILE=/path/to/registry.env`
+
+See [.env.example](.env.example) for a full template.
+
+### `subs`
+
+| Variable | CLI flag | Description |
+|----------|----------|-------------|
+| `SUBS_PORT` | `--port` | HTTP server port (default `7777`) |
+| `SUBS_DATA_DIR` | `--data-dir` | Data directory (default `./data`) |
+| `SUBS_WALLET` | `--wallet` | Wallet name for signing |
+| `SUBS_SPACED_RPC_URL` | `--rpc-url` | `spaced` RPC URL |
+| `SUBS_SPACED_RPC_USER` | `--rpc-user` | `spaced` RPC username |
+| `SUBS_SPACED_RPC_PASSWORD` | `--rpc-password` | `spaced` RPC password |
+| `SUBS_SPACED_RPC_COOKIE` | `--rpc-cookie` | `spaced` RPC cookie file path |
+| `SUBS_PROVER_ENDPOINT` | *(Settings UI)* | Prover URL written to `config.db` at startup |
+| `SUBS_REGISTRY_ENDPOINT` | *(Settings UI)* | Registry URL written to `config.db` at startup |
+| `SUBS_TEST_RIG` | `--test-rig` | Enable test rig (`1`, `true`, `yes`) |
+| `SUBS_TEST_RIG_DIR` | `--test-rig-dir` | Test rig data directory |
+
+### `subs-prover`
+
+| Variable | CLI flag | Description |
+|----------|----------|-------------|
+| `SUBS_PROVER_SERVER` | `--server` | Run as HTTP server (`1`, `true`, `yes`) |
+| `SUBS_PROVER_PORT` | `--server-port` | Server port (default `8888`) |
+| `SUBS_PROVER_INPUT` | `-i` / `--input` | Input file (prove/compress subcommands) |
+| `SUBS_PROVER_OUTPUT` | `-o` / `--output` | Output file (prove/compress subcommands) |
+| `SUBS_PROVER_BENCH_EXISTING` | `--existing` | Bench: existing handle count |
+| `SUBS_PROVER_BENCH_INSERT` | `--insert` | Bench: handles to insert |
+
+### `registry-server`
+
+| Variable | CLI flag | Description |
+|----------|----------|-------------|
+| `REGISTRY_SERVER_PORT` | `--port` | HTTP server port (default `8080`) |
+
+### Examples
+
+Using `export`:
+
+```bash
+export SUBS_SPACED_RPC_URL=http://127.0.0.1:7225
+export SUBS_WALLET=my-wallet
+export SUBS_DATA_DIR=./data
+export SUBS_PROVER_ENDPOINT=http://127.0.0.1:8888
+subs
+```
+
+Using a `.env` file:
+
+```bash
+cp .env.example .env
+# edit .env, then:
+subs
+```
+
+```bash
+# subs-prover from .env
+export SUBS_PROVER_SERVER=1
+export SUBS_PROVER_PORT=8888
+subs-prover
+```
+
+```bash
+# registry-server
+export REGISTRY_SERVER_PORT=8080
+registry-server
+```
+
+Log verbosity uses the standard `RUST_LOG` variable (e.g. `RUST_LOG=subs=debug,tower_http=debug`).
+
+On startup, each binary prints its **effective configuration** to the console with the **origin** of each value: `param` (CLI flag), `environment` (`export`), `.env` (dotenv file), or `default`. Sensitive values (passwords) are shown as `(set)` without revealing the secret. Example:
+
+```
+subs configuration:
+  (loaded env file: .env)
+  port = 7777 (.env)
+  data_dir = ./datamad (.env)
+  wallet = mad (environment)
+  rpc_url = http://127.0.0.1:7225 (.env)
+  rpc_password = (set) (.env)
+  server_url = http://127.0.0.1:7777 (derived from port)
+```
+
+CLI flags override environment variables; process environment overrides `.env` for the same key.
+
 ## Usage
 
 ### 1. Start the prover server

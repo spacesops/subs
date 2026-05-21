@@ -10,6 +10,7 @@ name = "registry-server"
 path = "src/main.rs"
 
 [dependencies]
+config-origins = { path = "../../config-origins" }
 axum = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
 tower-http = { workspace = true }

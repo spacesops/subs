@@ -1,3 +1,6 @@
+.env
+.env.*
+!.env.example
 .DS_Store
 Cargo.lock
 .vscode
@@ -11,3 +14,5 @@ target/
 .idea
 testrig-data
 data
+datamad
+NOTES.md

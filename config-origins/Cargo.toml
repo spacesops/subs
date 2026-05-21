@@ -1,0 +1,10 @@
+[package]
+name = "config-origins"
+version = "0.1.0"
+edition = "2021"
+description = "Startup configuration logging with value origins for subs binaries"
+publish = false
+
+[dependencies]
+clap = { workspace = true }
+dotenvy = { workspace = true }

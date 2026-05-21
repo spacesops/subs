@@ -40,7 +40,8 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
+use config_origins::{load_dotenv, log_entry, log_section, origin_from_clap};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
@@ -54,7 +55,7 @@ use tower_http::trace::TraceLayer;
 )]
 struct Cli {
     /// Server port
-    #[arg(short, long, default_value = "8080")]
+    #[arg(short, long, env = "REGISTRY_SERVER_PORT", default_value = "8080")]
     port: u16,
 }
 
@@ -82,6 +83,8 @@ enum RegistrationStatus {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let dotenv = load_dotenv("REGISTRY_SERVER_ENV_FILE");
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -90,7 +93,19 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    log_section("registry-server", &dotenv);
+    log_entry(
+        "port",
+        cli.port,
+        origin_from_clap(&matches, "port", Some("REGISTRY_SERVER_PORT"), &dotenv),
+    );
+    println!(
+        "  server_url = http://127.0.0.1:{} (derived from port)",
+        cli.port
+    );
 
     let state = Arc::new(AppState {
         registrations: RwLock::new(Vec::new()),

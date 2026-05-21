@@ -14,6 +14,7 @@
 
 mod background;
 mod config;
+mod env;
 mod routes;
 mod state;
 
@@ -24,7 +25,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use subs_core::Operator;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -41,46 +42,48 @@ use crate::state::AppState;
 )]
 struct Cli {
     /// Server port
-    #[arg(short, long, default_value = "7777")]
+    #[arg(short, long, env = "SUBS_PORT", default_value = "7777")]
     port: u16,
 
     /// Data directory for spaces
-    #[arg(short, long, default_value = "./data")]
+    #[arg(short, long, env = "SUBS_DATA_DIR", default_value = "./data")]
     data_dir: PathBuf,
 
     /// Wallet name for signing operations (not required with --test-rig)
-    #[arg(short, long, required_unless_present = "test_rig")]
+    #[arg(short, long, env = "SUBS_WALLET", required_unless_present = "test_rig")]
     wallet: Option<String>,
 
     /// Spaces RPC URL (not required with --test-rig)
-    #[arg(short, long, required_unless_present = "test_rig")]
+    #[arg(short, long, env = "SUBS_SPACED_RPC_URL", required_unless_present = "test_rig")]
     rpc_url: Option<String>,
 
     /// RPC username (optional)
-    #[arg(long)]
+    #[arg(long, env = "SUBS_SPACED_RPC_USER")]
     rpc_user: Option<String>,
 
     /// RPC password (optional)
-    #[arg(long)]
+    #[arg(long, env = "SUBS_SPACED_RPC_PASSWORD")]
     rpc_password: Option<String>,
 
     /// RPC cookie file path (optional)
-    #[arg(long)]
+    #[arg(long, env = "SUBS_SPACED_RPC_COOKIE")]
     rpc_cookie: Option<PathBuf>,
 
     /// Enable test rig mode (starts bitcoind + spaced automatically)
     #[cfg(feature = "test-rig")]
-    #[arg(long)]
+    #[arg(long, env = "SUBS_TEST_RIG")]
     test_rig: bool,
 
     /// Directory for test rig data (persistent across restarts)
     #[cfg(feature = "test-rig")]
-    #[arg(long, default_value = "./testrig-data")]
+    #[arg(long, env = "SUBS_TEST_RIG_DIR", default_value = "./testrig-data")]
     test_rig_dir: PathBuf,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let dotenv = env::load_dotenv("SUBS_ENV_FILE");
+
     // Initialize tracing
     tracing_subscriber::registry()
         .with(
@@ -90,7 +93,25 @@ async fn main() -> Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    env::log_startup(
+        &matches,
+        &dotenv,
+        env::StartupValues {
+            port: cli.port,
+            data_dir: &cli.data_dir,
+            wallet: cli.wallet.as_deref(),
+            rpc_url: cli.rpc_url.as_deref(),
+            rpc_user: cli.rpc_user.as_deref(),
+            rpc_password: cli.rpc_password.as_deref(),
+            rpc_cookie: cli.rpc_cookie.as_deref(),
+            #[cfg(feature = "test-rig")]
+            test_rig: cli.test_rig,
+            #[cfg(feature = "test-rig")]
+            test_rig_dir: &cli.test_rig_dir,
+        },
+    );
 
     #[cfg(feature = "test-rig")]
     {
@@ -141,6 +162,7 @@ async fn run_normal(cli: Cli) -> Result<()> {
     // Create config store
     let config_path = cli.data_dir.join("config.db");
     let config = ConfigStore::open(&config_path)?;
+    env::apply_runtime_config_from_env(&config)?;
 
     // Create operator
     let operator = Operator::new(cli.data_dir, wallet, rpc)
@@ -202,6 +224,7 @@ async fn run_with_test_rig(cli: Cli) -> Result<testrig::TestRigHandle> {
     // Create config store
     let config_path = cli.data_dir.join("config.db");
     let config = ConfigStore::open(&config_path)?;
+    env::apply_runtime_config_from_env(&config)?;
 
     // Use default wallet from test rig
     let wallet = "wallet_99";
@@ -294,7 +317,6 @@ async fn run_server_inner(state: AppState, port: u16) -> Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("Starting server on http://{}", addr);
     tracing::info!("Server URL: http://127.0.0.1:{}", port);
-    println!("Server URL: http://127.0.0.1:{} (port {})", port, port);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app)
