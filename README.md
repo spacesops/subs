@@ -146,6 +146,149 @@ subs configuration:
 
 CLI flags override environment variables; process environment overrides `.env` for the same key.
 
+## Docker
+
+The image is built from **Rust on Alpine** (musl). By default it includes `subs`, `subs-prover`, and `registry-server`; use build args to omit optional components. An entrypoint dispatches by component name or `SUBS_COMPONENT`.
+
+When all components are included, starting `subs` also starts **subs-prover** and **registry-server** in the same container:
+
+| Service | Default URL | Disable with |
+|---------|-------------|--------------|
+| subs-prover | `http://127.0.0.1:8888` (`SUBS_PROVER_ENDPOINT`) | `SUBS_START_PROVER=0` |
+| registry-server | `http://127.0.0.1:8080` (`SUBS_REGISTRY_ENDPOINT`) | `SUBS_START_REGISTRY=0` |
+
+**Note:** The image build includes RISC Zero proving when `ENABLE_PROVER` is enabled; use `GPU_ACCELERATION` to select CPU (`none`), Apple Metal (`metal`), or NVIDIA CUDA (`cuda`) for `subs-prover`.
+
+### Build
+
+Full image (subs + prover + registry):
+
+```bash
+docker build -t subs:latest .
+```
+
+Subs only (faster build; skips RISC Zero prover and registry):
+
+```bash
+docker build -t subs:slim \
+  --build-arg ENABLE_PROVER=false \
+  --build-arg ENABLE_REGISTRY=false .
+```
+
+Omit only the prover:
+
+```bash
+docker build -t subs:no-prover --build-arg ENABLE_PROVER=false .
+```
+
+Omit only the registry:
+
+```bash
+docker build -t subs:no-registry --build-arg ENABLE_REGISTRY=false .
+```
+
+Build args:
+
+| Build arg | Default | Description |
+|-----------|---------|-------------|
+| `ENABLE_PROVER` | `true` | Set to `false` to skip building/shipping `subs-prover` |
+| `ENABLE_REGISTRY` | `true` | Set to `false` to skip building/shipping `registry-server` |
+| `GPU_ACCELERATION` | `none` | `subs-prover` features: `none` (CPU), `metal`, or `cuda` |
+| `CARGO_BUILD_JOBS` | `1` | Parallel `rustc` jobs in the builder (raise only if Docker has enough RAM) |
+
+**Memory:** A full image with `subs-prover` often needs **8 GB+** RAM for the Docker builder VM. If the build fails with `cannot allocate memory`, increase **Docker Desktop → Settings → Resources → Memory**, keep `CARGO_BUILD_JOBS=1` (default), or build without the prover.
+
+**Disk:** `subs-prover` (RISC Zero) can use **20–40 GB** under `target/` during the build. If you see `No space left on device (os error 28)`, free Docker space and raise the disk limit:
+
+```bash
+docker system df
+docker builder prune -af   # drops build cache (safe before a clean rebuild)
+```
+
+Docker Desktop → **Settings → Resources → Disk image size** → **64 GB+** (or **Clean / Purge data** if the VM is full), then rebuild.
+
+**Linker (`__aarch64_cas4_sync` / `__aarch64_swp4_sync`):** On Alpine **arm64**, the prover build uses `-mno-outline-atomics` / `-C target-feature=-outline-atomics` (see Dockerfile `builder-prover` and `.cargo/config.toml`). If you changed those flags, rebuild without cache: `docker buildx build --no-cache-filter builder-prover ...`.
+
+```bash
+docker build -t subs:slim --build-arg ENABLE_PROVER=false .
+```
+
+```bash
+# NVIDIA CUDA prover (Linux hosts with GPU)
+docker build -t subs:cuda --build-arg GPU_ACCELERATION=cuda .
+
+# Apple Metal prover (macOS/arm64 builds)
+docker build -t subs:metal --build-arg GPU_ACCELERATION=metal .
+```
+
+### Run `subs`
+
+Point at a `spaced` instance reachable from the container (use `host.docker.internal` on Docker Desktop for a node on the host):
+
+```bash
+docker run --rm \
+  -p 7777:7777 -p 8888:8888 -p 8080:8080 \
+  -v subs-data:/data \
+  -e SUBS_SPACED_RPC_URL=http://host.docker.internal:7225 \
+  -e SUBS_WALLET=my-wallet \
+  -e SUBS_SPACED_RPC_USER=testuser \
+  -e SUBS_SPACED_RPC_PASSWORD=secret \
+  subs:latest subs
+```
+
+(`SUBS_PROVER_ENDPOINT` and `SUBS_REGISTRY_ENDPOINT` default to `http://127.0.0.1:8888` and `http://127.0.0.1:8080` in the image.)
+
+Or mount a `.env` file:
+
+```bash
+docker run --rm -p 7777:7777 \
+  -v "$(pwd)/.env:/data/.env:ro" \
+  -v subs-data:/data \
+  -e SUBS_ENV_FILE=/data/.env \
+  subs:latest
+```
+
+### Run `subs-prover` only
+
+The default `subs` command already starts subs-prover in the same container. To run the prover alone:
+
+```bash
+docker run --rm -p 8888:8888 \
+  -e SUBS_START_PROVER=0 \
+  -e SUBS_START_REGISTRY=0 \
+  subs:latest subs-prover --server
+```
+
+### Run `registry-server` only
+
+The default `subs` command already starts registry-server in the same container. To run registry alone:
+
+```bash
+docker run --rm -p 8080:8080 \
+  -e SUBS_START_PROVER=0 \
+  -e SUBS_START_REGISTRY=0 \
+  subs:latest registry-server
+```
+
+### Docker Compose
+
+Starts `subs` with embedded subs-prover (8888) and registry-server (8080) in the same container:
+
+```bash
+cp .env.example .env
+# Set SUBS_SPACED_RPC_URL=http://host.docker.internal:7225 and SUBS_WALLET=...
+docker compose up --build
+```
+
+Optional standalone services:
+
+```bash
+docker compose --profile prover-only up --build
+docker compose --profile registry-only up --build
+```
+
+Open http://localhost:7777 for the operator UI. Prover and registry APIs are at http://localhost:8888 and http://localhost:8080. Compose sets `SUBS_PROVER_ENDPOINT=http://127.0.0.1:8888` and `SUBS_REGISTRY_ENDPOINT=http://127.0.0.1:8080` by default.
+
 ## Usage
 
 ### 1. Start the prover server

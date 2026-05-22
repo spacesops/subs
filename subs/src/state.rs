@@ -1,5 +1,6 @@
 //! Application state for the subsd server.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use subs_core::Operator;
 
@@ -20,6 +21,8 @@ pub struct AppState {
     pub spaced_rpc_user: Option<String>,
     /// Spaced RPC password for proxied calls
     pub spaced_rpc_password: Option<String>,
+    /// Spaced RPC cookie file for proxied calls (used when user/password not set)
+    pub spaced_rpc_cookie: Option<PathBuf>,
     /// Bitcoin RPC URL (only available in test-rig mode)
     pub bitcoin_rpc_url: Option<String>,
     /// Certrelay URL (only available in test-rig mode)
@@ -37,6 +40,7 @@ impl AppState {
         spaced_rpc_url: Option<String>,
         spaced_rpc_user: Option<String>,
         spaced_rpc_password: Option<String>,
+        spaced_rpc_cookie: Option<PathBuf>,
         _bitcoin_rpc_url: Option<String>,
     ) -> Self {
         Self {
@@ -45,6 +49,7 @@ impl AppState {
             spaced_rpc_url,
             spaced_rpc_user,
             spaced_rpc_password,
+            spaced_rpc_cookie,
             bitcoin_rpc_url: None,
             certrelay_url: None,
         }
@@ -57,6 +62,7 @@ impl AppState {
         spaced_rpc_url: Option<String>,
         spaced_rpc_user: Option<String>,
         spaced_rpc_password: Option<String>,
+        spaced_rpc_cookie: Option<PathBuf>,
         bitcoin_rpc_url: Option<String>,
     ) -> Self {
         Self {
@@ -65,6 +71,7 @@ impl AppState {
             spaced_rpc_url,
             spaced_rpc_user,
             spaced_rpc_password,
+            spaced_rpc_cookie,
             bitcoin_rpc_url,
             certrelay_url: None,
             test_rig: None,
@@ -78,6 +85,7 @@ impl AppState {
         spaced_rpc_url: Option<String>,
         spaced_rpc_user: Option<String>,
         spaced_rpc_password: Option<String>,
+        spaced_rpc_cookie: Option<PathBuf>,
         bitcoin_rpc_url: Option<String>,
         certrelay_url: Option<String>,
         test_rig: Arc<TestRigHandle>,
@@ -88,6 +96,7 @@ impl AppState {
             spaced_rpc_url,
             spaced_rpc_user,
             spaced_rpc_password,
+            spaced_rpc_cookie,
             bitcoin_rpc_url,
             certrelay_url,
             test_rig: Some(test_rig),

@@ -8,8 +8,34 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use reqwest::RequestBuilder;
+
 use crate::state::AppState;
 use super::json_error;
+
+/// Apply Spaced RPC credentials to an outbound request (same precedence as `build_rpc_client`).
+fn apply_spaced_rpc_auth(
+    req: RequestBuilder,
+    state: &AppState,
+) -> Result<RequestBuilder, Response> {
+    if let Some(user) = state.spaced_rpc_user.as_deref() {
+        return Ok(req.basic_auth(user, state.spaced_rpc_password.as_deref()));
+    }
+    if let Some(path) = state.spaced_rpc_cookie.as_ref() {
+        let cookie = std::fs::read_to_string(path).map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read RPC cookie file: {e}"),
+            )
+        })?;
+        let encoded = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            cookie.trim().as_bytes(),
+        );
+        return Ok(req.header("Authorization", format!("Basic {encoded}")));
+    }
+    Ok(req)
+}
 
 #[derive(Debug, Deserialize)]
 pub struct RpcRequest {
@@ -84,12 +110,7 @@ pub async fn proxy_spaced(
         .as_ref()
         .ok_or_else(|| json_error(StatusCode::SERVICE_UNAVAILABLE, "Spaced RPC URL not configured"))?;
 
-    let auth = state
-        .spaced_rpc_user
-        .as_deref()
-        .map(|user| (user, state.spaced_rpc_password.as_deref().unwrap_or("")));
-
-    proxy_rpc_call(rpc_url, &request, auth).await
+    proxy_rpc_call(rpc_url, &request, |req| apply_spaced_rpc_auth(req, &state)).await
 }
 
 /// POST /rpc/bitcoin - Proxy RPC call to bitcoind (test-rig only)
@@ -102,7 +123,10 @@ pub async fn proxy_bitcoin(
         .as_ref()
         .ok_or_else(|| json_error(StatusCode::SERVICE_UNAVAILABLE, "Bitcoin RPC not available (only in test-rig mode)"))?;
 
-    proxy_rpc_call(rpc_url, &request, Some(("user", "password"))).await
+    proxy_rpc_call(rpc_url, &request, |req| {
+        Ok(req.basic_auth("user", Some("password")))
+    })
+    .await
 }
 
 /// POST /rpc/mine - Mine blocks (test-rig only)
@@ -135,11 +159,14 @@ pub async fn mine_blocks(
     Err(json_error(StatusCode::SERVICE_UNAVAILABLE, "Mining only available in test-rig mode"))
 }
 
-async fn proxy_rpc_call(
+async fn proxy_rpc_call<F>(
     rpc_url: &str,
     request: &RpcRequest,
-    auth: Option<(&str, &str)>,
-) -> Result<Json<serde_json::Value>, Response> {
+    apply_auth: F,
+) -> Result<Json<serde_json::Value>, Response>
+where
+    F: FnOnce(RequestBuilder) -> Result<RequestBuilder, Response>,
+{
     let client = reqwest::Client::new();
 
     // Build JSON-RPC request
@@ -150,14 +177,11 @@ async fn proxy_rpc_call(
         "params": request.params,
     });
 
-    let mut req = client
+    let req = client
         .post(rpc_url)
         .header("Content-Type", "application/json")
         .json(&rpc_body);
-
-    if let Some((user, pass)) = auth {
-        req = req.basic_auth(user, Some(pass));
-    }
+    let req = apply_auth(req)?;
 
     let response = req
         .timeout(std::time::Duration::from_secs(30))

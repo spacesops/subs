@@ -179,6 +179,7 @@ async fn run_normal(cli: Cli) -> Result<()> {
         Some(rpc_url.clone()),
         cli.rpc_user.clone(),
         cli.rpc_password.clone(),
+        cli.rpc_cookie.clone(),
         None,
     )
     .await
@@ -260,6 +261,7 @@ async fn run_server(
     spaced_rpc_url: Option<String>,
     spaced_rpc_user: Option<String>,
     spaced_rpc_password: Option<String>,
+    spaced_rpc_cookie: Option<PathBuf>,
     bitcoin_rpc_url: Option<String>,
 ) -> Result<()> {
     // Build app state
@@ -269,6 +271,7 @@ async fn run_server(
         spaced_rpc_url,
         spaced_rpc_user,
         spaced_rpc_password,
+        spaced_rpc_cookie,
         bitcoin_rpc_url,
     );
     run_server_inner(state, port).await
@@ -291,6 +294,7 @@ async fn run_server_with_testrig(
         Some(spaced_rpc_url),
         Some("user".to_string()),
         Some("pass".to_string()),
+        None,
         Some(bitcoin_rpc_url),
         Some(certrelay_url),
         test_rig,

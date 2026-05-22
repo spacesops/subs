@@ -1,0 +1,12 @@
+target/
+.git/
+.idea/
+.vscode/
+testrig-data/
+data/
+datamad/
+NOTES.md
+*.md
+!README.md
+.env
+.DS_Store

@@ -13,6 +13,8 @@ target/
 *.sdb
 .idea
 testrig-data
-data
-datamad
+data/
+datamad/
+datamadd/
 NOTES.md
+.cargo/
