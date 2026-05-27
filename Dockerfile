@@ -107,7 +107,7 @@ RUN --mount=type=bind,from=builder-subs,source=/out,target=/subs-out \
     fi; \
     if [ "$ENABLE_REGISTRY" != "false" ]; then \
         echo "SUBS_START_REGISTRY=1" >> /etc/subs-image.env; \
-        echo "SUBS_REGISTRY_ENDPOINT=http://127.0.0.1:8080" >> /etc/subs-image.env; \
+        echo "SUBS_REGISTRY_ENDPOINT=http://127.0.0.1:8081" >> /etc/subs-image.env; \
     else \
         echo "SUBS_START_REGISTRY=0" >> /etc/subs-image.env; \
     fi
@@ -124,9 +124,9 @@ USER subs
 ENV SUBS_DATA_DIR=/data
 ENV SUBS_PORT=7777
 ENV SUBS_PROVER_PORT=8888
-ENV REGISTRY_SERVER_PORT=8080
+ENV REGISTRY_SERVER_PORT=8081
 
-EXPOSE 7777 8888 8080
+EXPOSE 7777 8888 8080 8081
 
 ENTRYPOINT ["/sbin/tini", "--", "/entrypoint.sh"]
 CMD ["subs"]

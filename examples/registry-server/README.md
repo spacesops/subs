@@ -24,14 +24,14 @@ This architecture keeps subsd private (it holds wallet keys) while the registry 
 cargo build --release -p registry-server
 
 # Run (CLI or environment)
-registry-server --port 8080
-# REGISTRY_SERVER_PORT=8080 registry-server
+registry-server --port 8081
+# REGISTRY_SERVER_PORT=8081 registry-server
 # Loads .env from the current directory if present
 ```
 
 Then configure subsd to use this registry:
 1. Go to Settings in the subsd UI
-2. Set Registry Endpoint to `http://localhost:8080`
+2. Set Registry Endpoint to `http://localhost:8081`
 3. Click Test to verify connectivity
 
 ## Endpoints
@@ -57,7 +57,7 @@ Then configure subsd to use this registry:
 ### Register a handle (user)
 
 ```bash
-curl -X POST http://localhost:8080/register \
+curl -X POST http://localhost:8081/register \
   -H "Content-Type: application/json" \
   -d '{
     "handle": "alice@example",
@@ -68,19 +68,19 @@ curl -X POST http://localhost:8080/register \
 ### Check status (user)
 
 ```bash
-curl http://localhost:8080/status/alice@example
+curl http://localhost:8081/status/alice@example
 ```
 
 ### Get pending handles (subsd)
 
 ```bash
-curl http://localhost:8080/pending
+curl http://localhost:8081/pending
 ```
 
 ### Acknowledge staged (subsd)
 
 ```bash
-curl -X POST http://localhost:8080/ack \
+curl -X POST http://localhost:8081/ack \
   -H "Content-Type: application/json" \
   -d '{"handles": ["alice@example"]}'
 ```

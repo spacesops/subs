@@ -4,12 +4,12 @@
 # Usage:
 #   docker run <image> subs [flags...]
 #   docker run <image> subs-prover --server
-#   docker run <image> registry-server --port 8080
+#   docker run <image> registry-server --port 8081
 
 set -eu
 
 PROVER_PORT="${SUBS_PROVER_PORT:-8888}"
-REGISTRY_PORT="${REGISTRY_SERVER_PORT:-8080}"
+REGISTRY_PORT="${REGISTRY_SERVER_PORT:-8081}"
 
 # Apply image defaults from build (only for unset variables).
 load_image_defaults() {

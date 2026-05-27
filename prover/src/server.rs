@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 
 use axum::{
@@ -14,13 +15,44 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::Prover;
-use subs_types::{CompressInput, ProvingRequest};
+use subs_types::{CalibrationInfo, CompressInput, ProvingRequest};
+
+const CALIBRATION_CACHE_FILE: &str = "subs-prover-calibration.json";
+
+#[derive(Clone, Serialize, Deserialize)]
+struct CalibrationCache {
+    info: CalibrationInfo,
+}
+
+fn calibration_cache_path(data_dir: &StdPath) -> PathBuf {
+    data_dir.join(CALIBRATION_CACHE_FILE)
+}
+
+fn load_calibration_cache(path: &StdPath) -> anyhow::Result<Option<CalibrationInfo>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path)?;
+    let cache: CalibrationCache = serde_json::from_slice(&bytes)?;
+    Ok(Some(cache.info))
+}
+
+fn save_calibration_cache(path: &StdPath, info: &CalibrationInfo) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("tmp");
+    let bytes = serde_json::to_vec_pretty(&CalibrationCache { info: info.clone() })?;
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
 
 /// Job status
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -68,11 +100,11 @@ pub struct ServerState {
 }
 
 impl ServerState {
-    pub fn new(job_sender: mpsc::Sender<String>) -> Self {
+    pub fn new(job_sender: mpsc::Sender<String>, calibration: Option<CalibrationInfo>) -> Self {
         Self {
             jobs: RwLock::new(HashMap::new()),
             job_sender,
-            calibration: RwLock::new(None),
+            calibration: RwLock::new(calibration),
         }
     }
 }
@@ -100,7 +132,7 @@ pub struct ErrorResponse {
 }
 
 /// Start the prover server
-pub async fn run_server(port: u16) -> anyhow::Result<()> {
+pub async fn run_server(port: u16, data_dir: PathBuf) -> anyhow::Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -111,33 +143,76 @@ pub async fn run_server(port: u16) -> anyhow::Result<()> {
 
     // Create job channel
     let (tx, rx) = mpsc::channel::<String>(100);
-
-    // Create shared state
-    let state = Arc::new(ServerState::new(tx));
-
-    // Calibrate proving throughput on startup
-    tracing::info!("Calibrating proving throughput...");
-    let calibrate_state = state.clone();
-    let calibrate_handle = tokio::task::spawn_blocking(move || {
-        let prover = Prover::new();
-        prover.calibrate()
-    });
-    match calibrate_handle.await {
-        Ok(Ok(info)) => {
+    let cache_path = calibration_cache_path(&data_dir);
+    let cached_calibration = match load_calibration_cache(&cache_path) {
+        Ok(Some(info)) => {
             tracing::info!(
-                "Calibration complete: {:.2}s per segment at po2={}, {:.0} cycles/sec",
+                "Loaded calibration cache from {}: {:.2}s per segment at po2={}, {:.0} cycles/sec",
+                cache_path.display(),
                 info.seconds_per_segment,
                 info.calibration_po2,
                 info.cycles_per_sec,
             );
-            *calibrate_state.calibration.write().await = Some(info);
+            Some(info)
         }
-        Ok(Err(e)) => {
-            tracing::warn!("Calibration failed (estimates will be unavailable): {}", e);
+        Ok(None) => {
+            tracing::info!(
+                "No calibration cache found at {}; will calibrate in background",
+                cache_path.display()
+            );
+            None
         }
         Err(e) => {
-            tracing::warn!("Calibration task panicked: {}", e);
+            tracing::warn!(
+                "Failed to load calibration cache from {}: {}; calibrating in background",
+                cache_path.display(),
+                e
+            );
+            None
         }
+    };
+
+    // Create shared state
+    let state = Arc::new(ServerState::new(tx, cached_calibration));
+
+    // Calibrate proving throughput only when cache is missing/broken.
+    // Do this in background so server startup isn't blocked.
+    if state.calibration.read().await.is_none() {
+        let calibrate_state = state.clone();
+        let cache_path = cache_path.clone();
+        tokio::spawn(async move {
+            tracing::info!("Calibrating proving throughput...");
+            let calibrate_handle = tokio::task::spawn_blocking(move || {
+                let prover = Prover::new();
+                prover.calibrate()
+            });
+            match calibrate_handle.await {
+                Ok(Ok(info)) => {
+                    tracing::info!(
+                        "Calibration complete: {:.2}s per segment at po2={}, {:.0} cycles/sec",
+                        info.seconds_per_segment,
+                        info.calibration_po2,
+                        info.cycles_per_sec,
+                    );
+                    *calibrate_state.calibration.write().await = Some(info.clone());
+                    if let Err(e) = save_calibration_cache(&cache_path, &info) {
+                        tracing::warn!(
+                            "Failed to persist calibration cache to {}: {}",
+                            cache_path.display(),
+                            e
+                        );
+                    } else {
+                        tracing::info!("Saved calibration cache to {}", cache_path.display());
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("Calibration failed (estimates will be unavailable): {}", e);
+                }
+                Err(e) => {
+                    tracing::warn!("Calibration task panicked: {}", e);
+                }
+            }
+        });
     }
 
     // Spawn the worker

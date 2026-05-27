@@ -27,7 +27,7 @@
 //! # Usage
 //!
 //! ```bash
-//! registry-server --port 8080
+//! registry-server --port 8081
 //! ```
 
 use std::net::SocketAddr;
@@ -55,7 +55,7 @@ use tower_http::trace::TraceLayer;
 )]
 struct Cli {
     /// Server port
-    #[arg(short, long, env = "REGISTRY_SERVER_PORT", default_value = "8080")]
+    #[arg(short, long, env = "REGISTRY_SERVER_PORT", default_value = "8081")]
     port: u16,
 }
 

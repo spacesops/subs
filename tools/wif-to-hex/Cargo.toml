@@ -1,0 +1,15 @@
+[package]
+name = "wif-to-hex"
+version = "0.1.0"
+edition = "2021"
+description = "Decode Bitcoin WIF to a 64-character hex private key"
+
+[[bin]]
+name = "wif-to-hex"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+bitcoin = { workspace = true }
+clap = { workspace = true }
+hex = { workspace = true }

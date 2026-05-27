@@ -82,8 +82,17 @@ async fn main() -> Result<()> {
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
 
     if cli.server {
-        subs_prover::env::log_server_startup(&matches, &dotenv, cli.server, cli.server_port);
-        subs_prover::server::run_server(cli.server_port).await?;
+        let data_dir = std::env::var("SUBS_DATA_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("./data"));
+        subs_prover::env::log_server_startup(
+            &matches,
+            &dotenv,
+            cli.server,
+            cli.server_port,
+            &data_dir,
+        );
+        subs_prover::server::run_server(cli.server_port, data_dir).await?;
         return Ok(());
     }
 

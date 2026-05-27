@@ -10,19 +10,19 @@ services:
       SUBS_DATA_DIR: /data
       # subs-prover and registry-server start in the same container (see docker/entrypoint.sh).
       SUBS_PROVER_ENDPOINT: http://127.0.0.1:8888
-      SUBS_REGISTRY_ENDPOINT: http://127.0.0.1:8080
+      SUBS_REGISTRY_ENDPOINT: http://127.0.0.1:8081
       SUBS_START_PROVER: "1"
       SUBS_START_REGISTRY: "1"
       SUBS_PROVER_SERVER: "1"
       SUBS_PROVER_PORT: "8888"
-      REGISTRY_SERVER_PORT: "8080"
+      REGISTRY_SERVER_PORT: "8081"
       RUST_LOG: subs=info,subs_prover=info,registry_server=info,tower_http=debug
     volumes:
       - subs-data:/data
     ports:
       - "${SUBS_PORT:-7777}:7777"
       - "${SUBS_PROVER_PORT:-8888}:8888"
-      - "${REGISTRY_SERVER_PORT:-8080}:8080"
+      - "${REGISTRY_SERVER_PORT:-8081}:8081"
 
   # Optional: run a single component alone (embedded services disabled).
   subs-prover:
@@ -47,10 +47,10 @@ services:
     environment:
       SUBS_START_PROVER: "0"
       SUBS_START_REGISTRY: "0"
-      REGISTRY_SERVER_PORT: "8080"
+      REGISTRY_SERVER_PORT: "8081"
       RUST_LOG: registry_server=info,tower_http=debug
     ports:
-      - "${REGISTRY_SERVER_PORT:-8080}:8080"
+      - "${REGISTRY_SERVER_PORT:-8081}:8081"
     profiles:
       - registry-only
 

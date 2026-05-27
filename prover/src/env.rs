@@ -8,7 +8,13 @@ use config_origins::{
 pub use config_origins::load_dotenv;
 
 /// Log effective `subs-prover` configuration for server mode.
-pub fn log_server_startup(matches: &ArgMatches, dotenv: &DotenvLoad, server: bool, port: u16) {
+pub fn log_server_startup(
+    matches: &ArgMatches,
+    dotenv: &DotenvLoad,
+    server: bool,
+    port: u16,
+    data_dir: &std::path::Path,
+) {
     origins::log_section("subs-prover", dotenv);
     origins::log_entry(
         "server",
@@ -19,6 +25,12 @@ pub fn log_server_startup(matches: &ArgMatches, dotenv: &DotenvLoad, server: boo
         "server_port",
         port,
         origin_from_clap(matches, "server_port", Some("SUBS_PROVER_PORT"), dotenv),
+    );
+    let data_dir_origin = origin_for_env_var("SUBS_DATA_DIR", dotenv).unwrap_or(origins::ConfigOrigin::Default);
+    origins::log_entry("data_dir", data_dir.display(), data_dir_origin);
+    println!(
+        "  calibration_cache = {} (derived from data_dir)",
+        data_dir.join("subs-prover-calibration.json").display()
     );
     println!("  server_url = http://127.0.0.1:{} (derived from server_port)", port);
 }
