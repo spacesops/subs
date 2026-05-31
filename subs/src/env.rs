@@ -21,6 +21,8 @@ pub struct StartupValues<'a> {
     pub rpc_user: Option<&'a str>,
     pub rpc_password: Option<&'a str>,
     pub rpc_cookie: Option<&'a Path>,
+    pub basic_auth_user: Option<&'a str>,
+    pub basic_auth_password: Option<&'a str>,
     #[cfg(feature = "test-rig")]
     pub test_rig: bool,
     #[cfg(feature = "test-rig")]
@@ -84,6 +86,23 @@ pub fn log_startup(matches: &ArgMatches, dotenv: &DotenvLoad, cfg: StartupValues
         rpc_cookie.as_deref(),
         dotenv,
         false,
+    );
+
+    log_field(
+        matches,
+        "basic_auth_user",
+        "SUBS_BASIC_AUTH_USER",
+        cfg.basic_auth_user,
+        dotenv,
+        false,
+    );
+    log_field(
+        matches,
+        "basic_auth_password",
+        "SUBS_BASIC_AUTH_PASSWORD",
+        cfg.basic_auth_password,
+        dotenv,
+        true,
     );
 
     log_env_only("prover_endpoint", "SUBS_PROVER_ENDPOINT", dotenv, false);

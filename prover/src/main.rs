@@ -40,8 +40,40 @@ struct Cli {
     #[arg(long, env = "SUBS_PROVER_PORT", default_value = "8888")]
     server_port: u16,
 
+    /// HTTP Basic auth username for the prover server (enables auth when set with a password)
+    #[arg(long, env = "SUBS_PROVER_BASIC_AUTH_USER")]
+    basic_auth_user: Option<String>,
+
+    /// HTTP Basic auth password for the prover server (enables auth when set with a username)
+    #[arg(long, env = "SUBS_PROVER_BASIC_AUTH_PASSWORD")]
+    basic_auth_password: Option<String>,
+
     #[command(subcommand)]
     cmd: Option<Commands>,
+}
+
+/// Resolve the HTTP Basic auth credentials from CLI/env.
+///
+/// Auth is only enabled when both username and password are provided. If only one is
+/// set, a warning is logged and auth stays disabled to avoid a half-configured gate.
+fn resolve_basic_auth(
+    user: Option<&str>,
+    password: Option<&str>,
+) -> Option<(String, String)> {
+    match (user, password) {
+        (Some(u), Some(p)) => {
+            tracing::info!("HTTP Basic auth enabled for prover server (user={})", u);
+            Some((u.to_string(), p.to_string()))
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            tracing::warn!(
+                "HTTP Basic auth not enabled: both SUBS_PROVER_BASIC_AUTH_USER and \
+                 SUBS_PROVER_BASIC_AUTH_PASSWORD must be set"
+            );
+            None
+        }
+        (None, None) => None,
+    }
 }
 
 #[derive(Subcommand)]
@@ -91,8 +123,14 @@ async fn main() -> Result<()> {
             cli.server,
             cli.server_port,
             &data_dir,
+            cli.basic_auth_user.as_deref(),
+            cli.basic_auth_password.as_deref(),
         );
-        subs_prover::server::run_server(cli.server_port, data_dir).await?;
+        let basic_auth = resolve_basic_auth(
+            cli.basic_auth_user.as_deref(),
+            cli.basic_auth_password.as_deref(),
+        );
+        subs_prover::server::run_server(cli.server_port, data_dir, basic_auth).await?;
         return Ok(());
     }
 

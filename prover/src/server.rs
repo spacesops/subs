@@ -11,6 +11,7 @@ use std::sync::Arc;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
+    middleware,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -97,15 +98,27 @@ pub struct ServerState {
     /// Calibration data from startup benchmark.
     /// None if calibration hasn't run or failed.
     calibration: RwLock<Option<subs_types::CalibrationInfo>>,
+    /// Optional HTTP Basic auth credentials. `None` disables auth entirely.
+    basic_auth: Option<(String, String)>,
 }
 
 impl ServerState {
-    pub fn new(job_sender: mpsc::Sender<String>, calibration: Option<CalibrationInfo>) -> Self {
+    pub fn new(
+        job_sender: mpsc::Sender<String>,
+        calibration: Option<CalibrationInfo>,
+        basic_auth: Option<(String, String)>,
+    ) -> Self {
         Self {
             jobs: RwLock::new(HashMap::new()),
             job_sender,
             calibration: RwLock::new(calibration),
+            basic_auth,
         }
+    }
+
+    /// Configured HTTP Basic auth credentials, if any.
+    pub fn basic_auth(&self) -> &Option<(String, String)> {
+        &self.basic_auth
     }
 }
 
@@ -132,7 +145,11 @@ pub struct ErrorResponse {
 }
 
 /// Start the prover server
-pub async fn run_server(port: u16, data_dir: PathBuf) -> anyhow::Result<()> {
+pub async fn run_server(
+    port: u16,
+    data_dir: PathBuf,
+    basic_auth: Option<(String, String)>,
+) -> anyhow::Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -173,7 +190,7 @@ pub async fn run_server(port: u16, data_dir: PathBuf) -> anyhow::Result<()> {
     };
 
     // Create shared state
-    let state = Arc::new(ServerState::new(tx, cached_calibration));
+    let state = Arc::new(ServerState::new(tx, cached_calibration, basic_auth));
 
     // Calibrate proving throughput only when cache is missing/broken.
     // Do this in background so server startup isn't blocked.
@@ -221,7 +238,12 @@ pub async fn run_server(port: u16, data_dir: PathBuf) -> anyhow::Result<()> {
         run_worker(worker_state, rx).await;
     });
 
-    // Build router
+    // Build router.
+    //
+    // Layer ordering note: the last `.layer(...)` added runs first on the request.
+    // The auth layer is added before CORS/trace so that on the request path CORS runs
+    // first (handling preflight) and auth runs just before the handlers. The auth
+    // middleware also explicitly allows OPTIONS and GET /health through.
     let app = Router::new()
         .route("/health", get(health))
         .route("/prove", post(submit_prove))
@@ -229,6 +251,10 @@ pub async fn run_server(port: u16, data_dir: PathBuf) -> anyhow::Result<()> {
         .route("/compress", post(submit_compress))
         .route("/jobs/:job_id", get(get_job_status))
         .route("/jobs/:job_id/receipt", get(get_job_receipt))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::require_basic_auth,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(
             CorsLayer::new()

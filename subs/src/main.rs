@@ -25,6 +25,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use anyhow::Result;
+use axum::middleware;
 use clap::{CommandFactory, FromArgMatches, Parser};
 use subs_core::Operator;
 use tower_http::cors::{Any, CorsLayer};
@@ -69,6 +70,14 @@ struct Cli {
     #[arg(long, env = "SUBS_SPACED_RPC_COOKIE")]
     rpc_cookie: Option<PathBuf>,
 
+    /// HTTP Basic auth username for the UI/API (enables auth when set with a password)
+    #[arg(long, env = "SUBS_BASIC_AUTH_USER")]
+    basic_auth_user: Option<String>,
+
+    /// HTTP Basic auth password for the UI/API (enables auth when set with a username)
+    #[arg(long, env = "SUBS_BASIC_AUTH_PASSWORD")]
+    basic_auth_password: Option<String>,
+
     /// Enable test rig mode (starts bitcoind + spaced automatically)
     #[cfg(feature = "test-rig")]
     #[arg(long, env = "SUBS_TEST_RIG")]
@@ -106,6 +115,8 @@ async fn main() -> Result<()> {
             rpc_user: cli.rpc_user.as_deref(),
             rpc_password: cli.rpc_password.as_deref(),
             rpc_cookie: cli.rpc_cookie.as_deref(),
+            basic_auth_user: cli.basic_auth_user.as_deref(),
+            basic_auth_password: cli.basic_auth_password.as_deref(),
             #[cfg(feature = "test-rig")]
             test_rig: cli.test_rig,
             #[cfg(feature = "test-rig")]
@@ -171,6 +182,12 @@ async fn run_normal(cli: Cli) -> Result<()> {
     // Load all existing spaces from disk
     operator.load_all_spaces().await?;
 
+    // Resolve optional HTTP Basic auth for the UI/API
+    let basic_auth = resolve_basic_auth(
+        cli.basic_auth_user.as_deref(),
+        cli.basic_auth_password.as_deref(),
+    );
+
     // Build app state and run server
     run_server(
         operator,
@@ -180,6 +197,7 @@ async fn run_normal(cli: Cli) -> Result<()> {
         cli.rpc_user.clone(),
         cli.rpc_password.clone(),
         cli.rpc_cookie.clone(),
+        basic_auth,
         None,
     )
     .await
@@ -238,10 +256,16 @@ async fn run_with_test_rig(cli: Cli) -> Result<testrig::TestRigHandle> {
     // Load all existing spaces from disk
     operator.load_all_spaces().await?;
 
+    // Resolve optional HTTP Basic auth for the UI/API
+    let basic_auth = resolve_basic_auth(
+        cli.basic_auth_user.as_deref(),
+        cli.basic_auth_password.as_deref(),
+    );
+
     // Run server (this blocks until shutdown)
     let spaced_url = handle.spaced_rpc_url().to_string();
     let bitcoin_url = handle.bitcoin_rpc_url().to_string();
-    run_server_with_testrig(operator, config, cli.port, spaced_url, bitcoin_url, certrelay_url, handle.clone()).await?;
+    run_server_with_testrig(operator, config, cli.port, spaced_url, bitcoin_url, certrelay_url, basic_auth, handle.clone()).await?;
 
     // Background tasks (proving loop) hold AppState clones with Arc refs.
     // On shutdown just leak them; the process is exiting anyway.
@@ -254,6 +278,7 @@ async fn run_with_test_rig(cli: Cli) -> Result<testrig::TestRigHandle> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_server(
     operator: Operator,
     config: ConfigStore,
@@ -262,6 +287,7 @@ async fn run_server(
     spaced_rpc_user: Option<String>,
     spaced_rpc_password: Option<String>,
     spaced_rpc_cookie: Option<PathBuf>,
+    basic_auth: Option<(String, String)>,
     bitcoin_rpc_url: Option<String>,
 ) -> Result<()> {
     // Build app state
@@ -272,12 +298,14 @@ async fn run_server(
         spaced_rpc_user,
         spaced_rpc_password,
         spaced_rpc_cookie,
+        basic_auth,
         bitcoin_rpc_url,
     );
     run_server_inner(state, port).await
 }
 
 #[cfg(feature = "test-rig")]
+#[allow(clippy::too_many_arguments)]
 async fn run_server_with_testrig(
     operator: Operator,
     config: ConfigStore,
@@ -285,6 +313,7 @@ async fn run_server_with_testrig(
     spaced_rpc_url: String,
     bitcoin_rpc_url: String,
     certrelay_url: String,
+    basic_auth: Option<(String, String)>,
     test_rig: std::sync::Arc<testrig::TestRigHandle>,
 ) -> Result<()> {
     // Build app state with test rig
@@ -295,6 +324,7 @@ async fn run_server_with_testrig(
         Some("user".to_string()),
         Some("pass".to_string()),
         None,
+        basic_auth,
         Some(bitcoin_rpc_url),
         Some(certrelay_url),
         test_rig,
@@ -306,8 +336,17 @@ async fn run_server_inner(state: AppState, port: u16) -> Result<()> {
     // Start background proving loop
     background::spawn_proving_loop(state.clone());
 
-    // Build router
+    // Build router.
+    //
+    // Layer ordering note: the last `.layer(...)` added runs first on the request.
+    // The auth layer is added before CORS/trace in the builder chain so that on the
+    // request path CORS runs first (handling preflight) and auth runs just before the
+    // handlers. The auth middleware also explicitly allows OPTIONS and /health through.
     let app = routes::router()
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            routes::auth::require_basic_auth,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(
             CorsLayer::new()
@@ -328,6 +367,30 @@ async fn run_server_inner(state: AppState, port: u16) -> Result<()> {
         .await?;
 
     Ok(())
+}
+
+/// Resolve the HTTP Basic auth credentials from CLI/env.
+///
+/// Auth is only enabled when both username and password are provided. If only one is
+/// set, a warning is logged and auth stays disabled to avoid a half-configured gate.
+fn resolve_basic_auth(
+    user: Option<&str>,
+    password: Option<&str>,
+) -> Option<(String, String)> {
+    match (user, password) {
+        (Some(u), Some(p)) => {
+            tracing::info!("HTTP Basic auth enabled for UI/API (user={})", u);
+            Some((u.to_string(), p.to_string()))
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            tracing::warn!(
+                "HTTP Basic auth not enabled: both SUBS_BASIC_AUTH_USER and \
+                 SUBS_BASIC_AUTH_PASSWORD must be set"
+            );
+            None
+        }
+        (None, None) => None,
+    }
 }
 
 fn build_rpc_client(

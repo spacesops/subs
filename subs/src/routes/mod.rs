@@ -1,5 +1,6 @@
 //! Route handlers for the subsd REST API.
 
+pub mod auth;
 pub mod certs;
 pub mod commits;
 pub mod config;
@@ -34,6 +35,8 @@ pub fn router() -> Router<AppState> {
         .route("/ui/transactions", get(web::transactions_page))
         .route("/ui/spaces/:space", get(web::space_page))
         .route("/ui/spaces/:space/handles/:handle", get(web::handle_page))
+        // Health probe (kept anonymous by the auth middleware)
+        .route("/health", get(status::health))
         // API: Status & Spaces
         .route("/status", get(status::get_status))
         .route("/spaces", get(status::list_spaces))

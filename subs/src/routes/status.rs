@@ -12,6 +12,11 @@ use subs_core::{HandlesListResult, SpaceStatus, StatusResult};
 use crate::state::AppState;
 use super::json_error;
 
+/// GET /health - Lightweight liveness probe (always anonymous).
+pub async fn health() -> &'static str {
+    "ok"
+}
+
 /// GET /status - Get status of all spaces
 pub async fn get_status(
     State(state): State<AppState>,

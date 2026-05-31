@@ -2,6 +2,7 @@
 //!
 //! Provides the `Prover` struct for generating STARK proofs and SNARK compression.
 
+pub mod auth;
 pub mod env;
 pub mod server;
 
