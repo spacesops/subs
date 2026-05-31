@@ -5,6 +5,7 @@ pub mod commits;
 pub mod config;
 pub mod console;
 mod error;
+mod logging;
 pub mod proving;
 pub mod query;
 pub mod registry;
@@ -15,6 +16,7 @@ pub mod web;
 pub use error::json_error;
 
 use axum::{
+    middleware,
     routing::{get, post},
     Router,
 };
@@ -81,4 +83,5 @@ pub fn router() -> Router<AppState> {
         .route("/registry/status", get(registry::registry_status))
         .route("/registry/sync", post(registry::sync_from_registry))
         .route("/registry/notify", post(registry::notify_registry))
+        .layer(middleware::from_fn(logging::log_api_requests))
 }
