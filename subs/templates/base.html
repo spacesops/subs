@@ -197,6 +197,13 @@ body {
   transition: background 0.15s;
 }
 .publish-btn:hover { background: #eb7e3a; }
+.publish-btn:disabled {
+  background: var(--border-subtle);
+  color: var(--text-muted);
+  cursor: not-allowed;
+  opacity: 0.75;
+}
+.publish-btn:disabled:hover { background: var(--border-subtle); }
 .publish-btn .count {
   background: rgba(0,0,0,0.18); padding: 1px 6px;
   border-radius: 3px; font-size: 10px;

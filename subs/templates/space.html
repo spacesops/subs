@@ -295,7 +295,7 @@ async function refreshPipeline() {
         const msg = $('pipelineMessage');
         const actions = $('pipelineActions');
 
-        updatePublishBar(j.unpublished || 0);
+        updatePublishBar(j);
 
         if (!j.has_pending) {
             const sc = j.staged_count || 0;
@@ -447,15 +447,35 @@ function renderActions(r) {
     el.innerHTML = h;
 }
 
-function updatePublishBar(n) {
+function canPublish(pipeline) {
+    if (!pipeline || !(pipeline.unpublished > 0)) return false;
+    if (!pipeline.publish_require_finalized) return true;
+    return pipeline.publish_allowed !== false;
+}
+
+function updatePublishBar(pipeline) {
     const bar = $('publishBar');
-    if (n > 0) {
-        const batch = Math.min(n, 100);
-        const label = batch < n ? `${batch}/${n}` : `${n}`;
-        bar.innerHTML = `⊕ Publish <span class="count">${label}</span>`;
-        bar.classList.remove('hidden');
-    } else {
+    const n = pipeline?.unpublished || 0;
+    if (n <= 0) {
         bar.classList.add('hidden');
+        bar.disabled = false;
+        bar.title = '';
+        return;
+    }
+
+    const batch = Math.min(n, 100);
+    const label = batch < n ? `${batch}/${n}` : `${n}`;
+    bar.innerHTML = `⊕ Publish <span class="count">${label}</span>`;
+    bar.classList.remove('hidden');
+
+    const allowed = canPublish(pipeline);
+    bar.disabled = !allowed;
+    if (!allowed && pipeline.publish_blocked_reason) {
+        bar.title = pipeline.publish_blocked_reason;
+    } else if (!allowed) {
+        bar.title = 'Wait for commitment finalization (150 confirmations) before publishing';
+    } else {
+        bar.title = '';
     }
 }
 
@@ -530,6 +550,12 @@ async function rollbackLocal() {
 }
 
 async function publishCerts() {
+    if (currentPipeline && !canPublish(currentPipeline)) {
+        const reason = currentPipeline.publish_blocked_reason
+            || 'Publishing is blocked until the commitment is finalized on-chain';
+        logAction(`Error: ${reason}`);
+        return;
+    }
     logAction('Publishing certificates...');
     try {
         const { ok, data } = await api(`${spaceUrl}/publish`, { method: 'POST' });
@@ -862,7 +888,10 @@ function updateBulkBar() {
         else                  h += btn('Park', 'park') + btn('Unpark', 'unpark');
         h += btn('Remove', 'remove');
     }
-    h += btn(allPublished && !nonePublished ? 'Republish' : 'Publish', 'publish');
+    const publishAllowed = !currentPipeline?.publish_require_finalized || currentPipeline?.publish_allowed !== false;
+    if (publishAllowed) {
+        h += btn(allPublished && !nonePublished ? 'Republish' : 'Publish', 'publish');
+    }
     btns.innerHTML = h;
 }
 
@@ -881,6 +910,12 @@ function getSelectionContext() {
 }
 
 async function bulkAction(action) {
+    if (action === 'publish' && currentPipeline && !canPublish(currentPipeline)) {
+        const reason = currentPipeline.publish_blocked_reason
+            || 'Publishing is blocked until the commitment is finalized on-chain';
+        logAction(`Error: ${reason}`);
+        return;
+    }
     if (action === 'remove') {
         const count = selectAllMode ? lastTotal : selectedHandles.size;
         if (!confirm(`Remove ${count} staged handle(s)? This cannot be undone.`)) return;

@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use crate::core::{
     CompressInput, HealthWarning, LocalSpace, ProvingRequest, SkippedEntry, SpaceStatus,
 };
+use crate::storage::Handle;
 use crate::HandleRequest;
 use anyhow::anyhow;
 use bitcoin::hashes::{sha256, Hash as BitcoinHash};
@@ -154,6 +155,9 @@ pub struct PipelineStatus {
     /// Proving estimate for the current commitment (JSON EstimateResult)
     pub estimate: Option<serde_json::Value>,
 }
+
+/// Minimum on-chain confirmations before publish is allowed when finalization is required.
+pub const PUBLISH_FINALIZATION_CONFIRMATIONS: u32 = 150;
 
 impl LiveSpaceInfo {
     pub async fn issue_cert(
@@ -1498,10 +1502,133 @@ impl Operator {
         Ok(certs)
     }
 
+    /// When `require_finalized` is true, returns an error message if any handle cannot
+    /// be published yet (not broadcast, not confirmed, or fewer than 150 confirmations).
+    pub async fn publish_blocked_reason(
+        &self,
+        space: &SLabel,
+        require_finalized: bool,
+        handles: &[Handle],
+    ) -> anyhow::Result<Option<String>> {
+        if !require_finalized || handles.is_empty() {
+            return Ok(None);
+        }
+
+        let rpc = self
+            .require_rpc()
+            .map_err(|_| anyhow!("RPC required to verify commitment finalization before publish"))?;
+        let storage = self.get_local_space(space)?.storage();
+        let tip_height = rpc.get_server_info().await?.tip.height;
+
+        for h in handles {
+            let Some(root_hex) = h.commitment_root.as_deref() else {
+                return Ok(Some(format!(
+                    "handle {} is not committed; cannot publish",
+                    h.name
+                )));
+            };
+
+            let Some(commitment) = storage.get_commitment_by_root(root_hex).await? else {
+                return Ok(Some(format!(
+                    "no commitment found for handle {} (root {})",
+                    h.name, root_hex
+                )));
+            };
+
+            if commitment.commit_txid.is_none() {
+                return Ok(Some(format!(
+                    "commitment #{} for handle {} is not broadcast on-chain yet",
+                    commitment.idx, h.name
+                )));
+            }
+
+            let mut expected_root = [0u8; 32];
+            hex::decode_to_slice(&commitment.root, &mut expected_root)
+                .map_err(|e| anyhow!("invalid commitment root for #{}: {}", commitment.idx, e))?;
+
+            let on_chain = rpc.get_commitment(space.clone().into(), None).await?;
+            let Some(chain_commitment) = on_chain else {
+                return Ok(Some(format!(
+                    "commitment #{} for handle {} is not confirmed on-chain yet",
+                    commitment.idx, h.name
+                )));
+            };
+
+            if chain_commitment.state_root != expected_root {
+                return Ok(Some(format!(
+                    "on-chain tip does not match commitment #{} for handle {}",
+                    commitment.idx, h.name
+                )));
+            }
+
+            let confirmations = tip_height.saturating_sub(chain_commitment.block_height);
+            if confirmations < PUBLISH_FINALIZATION_CONFIRMATIONS {
+                return Ok(Some(format!(
+                    "commitment #{} has {}/{} confirmations; wait for finalization before publishing",
+                    commitment.idx, confirmations, PUBLISH_FINALIZATION_CONFIRMATIONS
+                )));
+            }
+        }
+
+        Ok(None)
+    }
+
+
+    /// Whether publishing is allowed for the next unpublished batch when finalization is required.
+    pub async fn publish_gate(
+        &self,
+        space: &SLabel,
+        require_finalized: bool,
+        limit: usize,
+    ) -> anyhow::Result<(bool, Option<String>)> {
+        if !require_finalized {
+            return Ok((true, None));
+        }
+
+        let local_space = self.get_local_space(space)?;
+        let storage = local_space.storage();
+        let confirmed_idx = if let Ok(live) = self.get_live_space(space.clone()).await {
+            if let Some(tip) = live.tip.as_ref().map(|c| c.state_root) {
+                storage
+                    .get_commitment_by_root(&hex::encode(tip))
+                    .await?
+                    .map(|c| c.idx)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let handles = storage
+            .select_handles(crate::storage::HandleSelector::Unpublished(confirmed_idx))
+            .await?;
+        if handles.is_empty() {
+            return Ok((true, None));
+        }
+
+        let batch: Vec<_> = handles.into_iter().take(limit).collect();
+        match self
+            .publish_blocked_reason(space, require_finalized, &batch)
+            .await?
+        {
+            None => Ok((true, None)),
+            Some(reason) => Ok((false, Some(reason))),
+        }
+    }
+
     /// Publish certificates for unpublished handles, up to `limit` at a time.
     /// If `only` is non-empty, only publish those specific handle names.
+    /// When `require_finalized` is true, publish is rejected until each handle's
+    /// commitment has 150 on-chain confirmations.
     /// Returns (published_count, remaining_count).
-    pub async fn publish_certs(&self, space: &SLabel, limit: usize, only: &[String]) -> anyhow::Result<(usize, usize)> {
+    pub async fn publish_certs(
+        &self,
+        space: &SLabel,
+        limit: usize,
+        only: &[String],
+        require_finalized: bool,
+    ) -> anyhow::Result<(usize, usize)> {
         self.require_fabric()?;
 
         let local_space = self.get_local_space(space)?;
@@ -1538,6 +1665,13 @@ impl Operator {
 
         let total = all_handles.len();
         let batch: Vec<_> = all_handles.into_iter().take(limit).collect();
+
+        if let Some(reason) = self
+            .publish_blocked_reason(space, require_finalized, &batch)
+            .await?
+        {
+            return Err(anyhow!(reason));
+        }
 
         let handle_names: Vec<SName> = batch
             .iter()
