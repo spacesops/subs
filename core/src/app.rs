@@ -1563,9 +1563,13 @@ impl Operator {
 
             let confirmations = tip_height.saturating_sub(chain_commitment.block_height);
             if confirmations < PUBLISH_FINALIZATION_CONFIRMATIONS {
+                let remaining = PUBLISH_FINALIZATION_CONFIRMATIONS - confirmations;
                 return Ok(Some(format!(
-                    "commitment #{} has {}/{} confirmations; wait for finalization before publishing",
-                    commitment.idx, confirmations, PUBLISH_FINALIZATION_CONFIRMATIONS
+                    "commitment #{} has {}/{} confirmations ({} more needed before publish)",
+                    commitment.idx,
+                    confirmations,
+                    PUBLISH_FINALIZATION_CONFIRMATIONS,
+                    remaining
                 )));
             }
         }

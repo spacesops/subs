@@ -453,6 +453,22 @@ function canPublish(pipeline) {
     return pipeline.publish_allowed !== false;
 }
 
+/** Human-readable reason publish is blocked, including remaining confirmations when known. */
+function publishBlockedReason(pipeline) {
+    if (!pipeline) {
+        return 'Publishing is blocked until the commitment has 150 confirmations';
+    }
+    if (pipeline.publish_blocked_reason) return pipeline.publish_blocked_reason;
+    const m = String(pipeline.message || '').match(/^(\d+)\/(\d+)\s+confirmations$/);
+    if (m) {
+        const cur = parseInt(m[1], 10);
+        const max = parseInt(m[2], 10);
+        const remaining = Math.max(0, max - cur);
+        return `Publishing is blocked until finalization: ${cur}/${max} confirmations (${remaining} more needed)`;
+    }
+    return 'Publishing is blocked until the commitment has 150 confirmations';
+}
+
 function updatePublishBar(pipeline) {
     const bar = $('publishBar');
     const n = pipeline?.unpublished || 0;
@@ -470,13 +486,7 @@ function updatePublishBar(pipeline) {
 
     const allowed = canPublish(pipeline);
     bar.disabled = !allowed;
-    if (!allowed && pipeline.publish_blocked_reason) {
-        bar.title = pipeline.publish_blocked_reason;
-    } else if (!allowed) {
-        bar.title = 'Wait for commitment finalization (150 confirmations) before publishing';
-    } else {
-        bar.title = '';
-    }
+    bar.title = allowed ? '' : publishBlockedReason(pipeline);
 }
 
 // ---------------------------------------------------------------------------
@@ -551,9 +561,7 @@ async function rollbackLocal() {
 
 async function publishCerts() {
     if (currentPipeline && !canPublish(currentPipeline)) {
-        const reason = currentPipeline.publish_blocked_reason
-            || 'Publishing is blocked until the commitment is finalized on-chain';
-        logAction(`Error: ${reason}`);
+        logAction(`Error: ${publishBlockedReason(currentPipeline)}`);
         return;
     }
     logAction('Publishing certificates...');
@@ -911,9 +919,7 @@ function getSelectionContext() {
 
 async function bulkAction(action) {
     if (action === 'publish' && currentPipeline && !canPublish(currentPipeline)) {
-        const reason = currentPipeline.publish_blocked_reason
-            || 'Publishing is blocked until the commitment is finalized on-chain';
-        logAction(`Error: ${reason}`);
+        logAction(`Error: ${publishBlockedReason(currentPipeline)}`);
         return;
     }
     if (action === 'remove') {
