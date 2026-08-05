@@ -176,7 +176,10 @@ impl ProgressSink {
         self.proving_cycles_done
             .fetch_add(1u64 << po2, Ordering::Relaxed);
         let done = self.segments_done.fetch_add(1, Ordering::Relaxed) + 1;
-        let ms = self.started.elapsed().as_millis() as u64;
+        // Floored at 1: zero is the "no segment yet" sentinel, and a segment
+        // that lands inside a millisecond would otherwise read as one that
+        // never happened, dropping both the ETA and the first-segment figure.
+        let ms = (self.started.elapsed().as_millis() as u64).max(1);
         self.last_segment_millis.store(ms, Ordering::Relaxed);
         if done == 1 {
             self.first_segment_millis.store(ms, Ordering::Relaxed);
@@ -325,5 +328,89 @@ impl SegmentProgress {
 impl SessionEvents for SegmentProgress {
     fn on_post_prove_segment(&self, segment: &Segment) {
         self.sink.on_segment_proven(segment.po2());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durations_are_compact() {
+        assert_eq!(fmt_duration(0.4), "0s");
+        assert_eq!(fmt_duration(48.0), "48s");
+        assert_eq!(fmt_duration(92.0), "1m 32s");
+        assert_eq!(fmt_duration(120.0), "2m");
+        assert_eq!(fmt_duration(7500.0), "2h 5m");
+    }
+
+    #[test]
+    fn cycles_are_abbreviated() {
+        assert_eq!(fmt_cycles(842), "842");
+        assert_eq!(fmt_cycles(93_823), "93.8K");
+        assert_eq!(fmt_cycles(1_567_156), "1.6M");
+        assert_eq!(fmt_cycles(8_451_200), "8.5M");
+    }
+
+    /// Before any segment lands there is no count and no rate, so the snapshot
+    /// says what it is doing rather than drawing a bar at zero.
+    #[test]
+    fn executing_reports_no_bar_position() {
+        let sink = ProgressSink::new();
+        let p = sink.snapshot();
+        assert_eq!(p.label.as_deref(), Some("Executing"));
+        assert_eq!(p.fraction, None);
+        assert_eq!(p.stats.len(), 1);
+        assert_eq!(p.stats[0].label, "elapsed");
+    }
+
+    /// The prover formats its own values: the wire carries "1.6M", not 1567156.
+    #[test]
+    fn proving_reports_formatted_stats_in_order() {
+        let sink = ProgressSink::new();
+        sink.on_session_ready(1_567_156, 2);
+        sink.on_segment_proven(18);
+
+        let p = sink.snapshot();
+        assert_eq!(p.label.as_deref(), Some("Proving segments"));
+        assert_eq!(p.phase, Some(1));
+        assert_eq!(p.phase_total, Some(2));
+
+        let labels: Vec<&str> = p.stats.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, ["remaining", "elapsed", "segments", "cycles", "first segment"]);
+        assert!(p.stats[0].accent, "remaining is what an operator waits on");
+        assert_eq!(p.stats[2].value, "1/2");
+        assert_eq!(p.stats[3].value, "1.6M");
+    }
+
+    /// Once every segment is proven, lift/join/resolve run with no hook to
+    /// observe. No fraction is sent, so the bar defaults to indeterminate
+    /// rather than sitting full for the majority of the job.
+    #[test]
+    fn recursion_reports_no_fraction() {
+        let sink = ProgressSink::new();
+        sink.on_session_ready(93_823, 1);
+        sink.on_segment_proven(17);
+
+        let p = sink.snapshot();
+        assert_eq!(p.label.as_deref(), Some("Producing succinct receipt"));
+        assert_eq!(p.phase, Some(2));
+        assert_eq!(p.fraction, None, "nothing to extrapolate from");
+        assert!(p.bar.is_none(), "default rule covers it");
+        let labels: Vec<&str> = p.stats.iter().map(|s| s.label.as_str()).collect();
+        assert!(!labels.contains(&"segments"), "all done; the count is noise now");
+    }
+
+    /// A finished job must stop ageing.
+    #[test]
+    fn finish_freezes_elapsed() {
+        let sink = ProgressSink::new();
+        sink.on_session_ready(100, 1);
+        sink.finish();
+        let a = sink.snapshot();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let b = sink.snapshot();
+        let val = |p: &JobProgress| p.stats.iter().find(|s| s.label == "elapsed").unwrap().value.clone();
+        assert_eq!(val(&a), val(&b));
     }
 }
