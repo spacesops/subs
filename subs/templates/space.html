@@ -229,6 +229,10 @@ let currentPipeline = null;
 // boolean so it can be cleared and re-armed on every pass: a flag that is only
 // ever set true stops the chain after a single tick.
 let pipelinePollTimer = null;
+// Last rendered step, so a transition always gets one more render. Without it
+// the poll disarms on entering a state it does not watch — e.g. proving ->
+// broadcast — leaving the finished proof's UI frozen on screen.
+let lastPipelineStep;
 let currentFilter = null;
 let searchTimeout = null;
 let selectedHandles = new Set();
@@ -240,10 +244,16 @@ let handleMeta = {};
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+// Escapes for text *and* attribute contexts. The previous version round-tripped
+// through div.textContent/innerHTML, which escapes only & < > — leaving quotes
+// intact, so anything interpolated into title="…" or onclick="…('…')" could
+// break out of the attribute. Values reaching here include field names chosen
+// by whichever prover is configured. Entities still render as the literal
+// characters in text contexts, so this is safe everywhere.
 function esc(t) {
-    const d = document.createElement('div');
-    d.textContent = t;
-    return d.innerHTML;
+    return String(t == null ? '' : t).replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[c]);
 }
 
 function $(id) { return document.getElementById(id); }
@@ -309,11 +319,18 @@ async function refreshPipeline() {
             clearTimeout(pipelinePollTimer);
             pipelinePollTimer = null;
         }
+        const stepChanged = lastPipelineStep !== undefined && lastPipelineStep !== j.current_step;
+        lastPipelineStep = j.current_step;
+
         if ((j.steps && j.steps.proving === 'in_progress' && j.prover_configured)
+            || j.proving_job_active
             || j.current_step === 'confirmed'
             || j.current_step === 'finalized'
             || j.current_step === 'published'
-            || (j.unpublished || 0) > 0) {
+            || (j.unpublished || 0) > 0
+            // One more pass after any transition, so the state we just left is
+            // never what stays on screen.
+            || stepChanged) {
             pipelinePollTimer = setTimeout(refreshPipeline, 5000);
         }
 
@@ -408,6 +425,163 @@ function renderStepper(r) {
     $('pipelineStepper').innerHTML = h;
 }
 
+// Cycle counts run to millions, where exact digits are noise.
+function fmtCycles(n) {
+    if (n == null) return null;
+    if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
+    if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+    if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+    return `${n}`;
+}
+
+// Compact form for stat tiles, where "1 minute 32 seconds" wraps to two lines
+// and buries the number. Prose elsewhere still uses fmtDuration.
+function fmtDurationShort(sec) {
+    if (sec == null) return null;
+    const total = Math.max(0, Math.round(sec));
+    if (total < 60) return `${total}s`;
+    const mins = Math.floor(total / 60);
+    if (mins < 60) {
+        const secs = total % 60;
+        return secs === 0 ? `${mins}m` : `${mins}m ${secs}s`;
+    }
+    const hours = Math.floor(mins / 60);
+    const remMins = mins % 60;
+    return remMins === 0 ? `${hours}h` : `${hours}h ${remMins}m`;
+}
+
+function fmtDuration(sec) {
+    if (sec == null) return null;
+    const total = Math.max(0, Math.round(sec));
+    const unit = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+    if (total < 60) return unit(total, 'second');
+
+    const mins = Math.floor(total / 60);
+    const secs = total % 60;
+    if (mins < 60) {
+        // Seconds stop mattering once it is a long wait.
+        return mins >= 10 || secs === 0
+            ? unit(mins, 'minute')
+            : `${unit(mins, 'minute')} ${unit(secs, 'second')}`;
+    }
+
+    const hours = Math.floor(mins / 60);
+    const remMins = mins % 60;
+    return remMins === 0
+        ? unit(hours, 'hour')
+        : `${unit(hours, 'hour')} ${unit(remMins, 'minute')}`;
+}
+
+function renderProvingProgress(p, jobId) {
+    // Shown even with no progress yet: the id is what correlates this proof
+    // with the prover's logs and with the runpod proxy.
+    const idRow = jobId
+        ? `<div class="hash-row" style="margin-top:8px">
+             <span class="hash-label">job</span>
+             <span class="hash-value">${esc(jobId)}</span>
+             <button class="hash-copy" onclick="copyToClipboard('${esc(jobId)}',this)">copy</button>
+           </div>`
+        : '';
+
+    // Absent for a prover that predates progress reporting, or while the
+    // executor is still running before the first segment is proven.
+    if (!p || !p.segments) return idRow;
+
+    // `title` carries any explanation, so the tiles stay uniform instead of
+    // growing a line of prose underneath.
+    const stat = (label, value, opts = {}) => `
+        <div class="prove-stat${opts.accent ? ' prove-stat-accent' : ''}"${opts.title ? ` title="${esc(opts.title)}"` : ''}>
+            <span class="prove-stat-label">${esc(label)}</span>
+            <span class="prove-stat-value">${esc(value)}</span>
+        </div>`;
+
+    const elapsed = fmtDurationShort(p.elapsed_seconds);
+    const phaseTotal = p.phase_total || 1;
+    // Phase 2 is lift/join/resolve. risc0 fires no hook during it, so there is
+    // nothing to measure and nothing to extrapolate — it gets a moving bar
+    // with no percentage rather than a full one that sits there. On a measured
+    // single-segment proof this phase was 28.1s of 38.8s, so a bar pinned at
+    // 100% for its duration was the most misleading thing on the page.
+    const inPhaseTwo = phaseTotal > 1 && p.phase >= 2;
+    // An indeterminate bar is also right for the first segment: nothing has
+    // been timed yet, so there is no honest position to draw.
+    const indeterminate = inPhaseTwo || p.phase_one_fraction == null;
+    // Just the counter — the phase's description is the panel heading.
+    const phaseLabel = phaseTotal > 1 ? `Phase ${p.phase} of ${phaseTotal}` : null;
+
+    // No ETA until a segment lands — there is nothing to extrapolate from.
+    // Absent for all of phase 2, by design. Its absence is not annotated: it is
+    // the normal case here, and saying so reads as a fault.
+    const remaining = p.estimated_total_seconds != null
+        ? fmtDurationShort(Math.max(0, p.estimated_total_seconds - p.elapsed_seconds))
+        : null;
+
+    // Driven by the prover's interpolated fraction, which advances within the
+    // segment being proven. A bar keyed on segments_done alone would sit still
+    // for the minute-plus each segment takes, then jump.
+    const bar = indeterminate
+        ? `<div class="prove-fill-indeterminate"></div>`
+        : `<div class="prove-fill" style="width:${Math.min(100, Math.round(p.phase_one_fraction * 100))}%"></div>`;
+
+    let h = `<div class="prove-panel">
+        <div class="prove-head">
+            <span class="prove-phase">${esc(inPhaseTwo ? 'Producing succinct receipt' : 'Proving segments')}</span>
+            ${phaseLabel ? `<span class="prove-phase-num">${esc(phaseLabel)}</span>` : ''}
+        </div>
+        <div class="prove-track">${bar}</div>
+        <div class="prove-stats">`;
+
+    // Ordered by what someone watching a proof actually wants: how much longer,
+    // then how long so far, then the work being done.
+    if (remaining) h += stat('remaining', `~${remaining}`, { accent: true });
+    h += stat('elapsed', elapsed);
+    if (!inPhaseTwo) h += stat('segments', `${p.segments_done}/${p.segments}`);
+    // Collected by the prover and forwarded all along, but previously listed in
+    // KNOWN (so skipped by the extras block) without being rendered anywhere —
+    // so cycle counts never reached the page at all.
+    if (p.total_cycles) h += stat('cycles', fmtCycles(p.total_cycles));
+    // Gated on `segments_done > 1` before, which a single-segment job never
+    // reaches — so on the proofs this actually produces it never rendered. It
+    // is the only number separating warm-up (PTX JIT) from steady-state rate.
+    if (p.first_segment_seconds != null && p.segments_done >= 1) {
+        h += stat('first segment', fmtDurationShort(p.first_segment_seconds), {
+            title: 'The first segment includes GPU warm-up and any PTX JIT, so it runs slower than the ones after it.',
+        });
+    }
+
+    // Whatever else the prover chose to report. A custom prover — the runpod
+    // proxy, say — knows things this UI cannot anticipate: the GPU it rented,
+    // the pod's hourly rate, queue position. They flow into the same grid as
+    // the built-in stats, so a new field looks native without a subs change.
+    const KNOWN = new Set([
+        'total_cycles', 'proving_cycles_done', 'segments', 'segments_done',
+        'elapsed_seconds', 'estimated_total_seconds', 'first_segment_seconds',
+        'phase', 'phase_total', 'phase_one_fraction',
+    ]);
+    for (const [k, v] of Object.entries(p)) {
+        if (KNOWN.has(k) || v == null || typeof v === 'object') continue;
+        const label = k.replace(/_/g, ' ');
+        // Labels are ellipsized to keep tiles uniform, so the full name has to
+        // stay reachable — a custom prover can name a field anything.
+        h += stat(label, typeof v === 'number' ? v.toLocaleString() : String(v), { title: label });
+    }
+
+    h += '</div>';
+    return h + '</div>' + idRow;
+}
+
+async function cancelProving() {
+    if (!confirm('Cancel this proof?\n\nA queued job stops immediately. One already running finishes on the prover and its result is discarded — the GPU time is not reclaimed.')) return;
+    const { ok, data } = await api(`${spaceUrl}/proving/cancel`, { method: 'POST' });
+    if (ok) {
+        logAction(`Proving cancelled: ${data.job_id}`);
+        refreshPipeline();
+    } else {
+        logAction(`Cancel failed: ${data.error || 'unknown'}`);
+    }
+}
+
 function renderActions(r) {
     const el = $('pipelineActions');
     let h = '';
@@ -427,24 +601,23 @@ function renderActions(r) {
                         <path opacity="0.75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
                     <span style="font-size:13px">Generating proof${proofLabel}...
                         <span style="color:var(--text-muted)">(${total} pending)</span></span></div>`;
+                h += renderProvingProgress(r.proving_progress, r.proving_job_id);
             }
-            if (r.estimate) {
-                h += '<div style="margin-top:10px;padding:12px;background:var(--bg-base);border:1px solid var(--border-subtle);border-radius:8px">';
-                for (const [k, v] of Object.entries(r.estimate)) {
-                    if (v == null || typeof v === 'object') continue;
-                    const label = k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-                    const val = typeof v === 'number' ? v.toLocaleString() : String(v);
-                    h += `<div style="font-family:var(--mono);font-size:11px;color:var(--text-muted);margin-bottom:2px">
-                        <span>${esc(label)}:</span> <span style="color:var(--text-secondary)">${esc(val)}</span></div>`;
-                }
-                h += '</div>';
-            }
+            // The pre-prove estimate is not rendered. It is persisted on the
+            // commitment when fetched, so it outlives the prover that produced
+            // it and kept showing after calibration was turned off. Its timings
+            // are also wrong: calibration measures ProverOpts::composite(),
+            // which skips lift/join, while real jobs run succinct() — so it
+            // read ~43% low against a measured proof. The live progress in
+            // renderProvingProgress supersedes it.
             if (!r.proving_job_active) {
                 h += `<div class="flex gap-3" style="margin-top:10px">
                     <button onclick="startProving()" class="btn-primary">Prove${proofLabel ? ' ' + proofLabel.trim() : ''}</button>
                     <button onclick="rollbackLocal()" class="btn-secondary">Rollback</button></div>`;
             } else {
-                h += '<button onclick="rollbackLocal()" class="btn-sm" style="margin-top:10px">Rollback Local</button>';
+                h += `<div class="flex gap-3" style="margin-top:10px">
+                    <button onclick="cancelProving()" class="btn-secondary">Cancel Job</button>
+                    <button onclick="rollbackLocal()" class="btn-sm">Rollback Local</button></div>`;
             }
         } else {
             h += `<div class="alert alert-warning">

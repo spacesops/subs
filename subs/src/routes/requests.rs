@@ -133,8 +133,14 @@ pub async fn bulk_generate(
     let secp = Secp256k1::new();
     let mut requests = Vec::with_capacity(body.count);
 
-    for i in 0..body.count {
-        let handle_str = format!("{}{}{}", body.prefix, i, body.space);
+    for _ in 0..body.count {
+        // Random rather than sequential from 0. Sequential names collide with
+        // everything generated before them, and duplicates are skipped
+        // silently, so asking for 100 against a space holding 100k handles
+        // used to stage nothing at all -- you had to ask for 100_100 to reach
+        // fresh names. 64 bits of suffix makes a collision irrelevant here.
+        let suffix: u64 = rand::random();
+        let handle_str = format!("{}{:016x}{}", body.prefix, suffix, body.space);
         let handle: spaces_protocol::sname::SName = handle_str
             .parse()
             .map_err(|e| json_error(StatusCode::BAD_REQUEST, format!("invalid handle {}: {}", handle_str, e)))?;
@@ -156,12 +162,16 @@ pub async fn bulk_generate(
         });
     }
 
-    let count = requests.len();
-    state
+    // Report what was actually added, not what was generated. These differ
+    // whenever a name collides, and reporting the generated count made a
+    // no-op bulk generate look like a success.
+    let result = state
         .operator
         .add_requests(requests)
         .await
         .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok(Json(BulkGenerateResponse { staged: count }))
+    Ok(Json(BulkGenerateResponse {
+        staged: result.total_added,
+    }))
 }

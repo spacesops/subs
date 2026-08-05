@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, RwLock};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::Prover;
+use crate::{JobProgress, ProgressSink, Prover};
 use subs_types::{CompressInput, ProvingRequest};
 
 /// Job status
@@ -31,6 +31,7 @@ pub enum JobStatus {
     Processing,
     Complete,
     Failed,
+    Cancelled,
 }
 
 /// Job type
@@ -51,6 +52,13 @@ pub struct Job {
     pub request: JobRequest,
     pub receipt: Option<Vec<u8>>,
     pub error: Option<String>,
+    /// Live counters, shared with the proving thread. Attached before proving
+    /// starts so /jobs/:id can report progress while the job is still running.
+    pub progress: Option<Arc<ProgressSink>>,
+    /// Set by /jobs/:id/cancel. A queued job never starts; a running one is
+    /// abandoned when it finishes — see cancel_job for why it cannot be
+    /// interrupted mid-proof.
+    pub cancel_requested: bool,
 }
 
 #[derive(Clone)]
@@ -92,6 +100,10 @@ pub struct JobStatusResponse {
     pub job_type: JobType,
     pub status: JobStatus,
     pub error: Option<String>,
+    /// Absent until execution finishes and proving begins, and for compress
+    /// jobs, which have no segments. Consumers that predate this ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<JobProgress>,
 }
 
 /// Error response
@@ -114,7 +126,7 @@ pub struct ErrorResponse {
 /// lower ceiling is the one that 413s.
 const MAX_BODY_BYTES: usize = 512 * 1024 * 1024;
 
-pub async fn run_server(port: u16, no_calibrate: bool) -> anyhow::Result<()> {
+pub async fn run_server(port: u16, calibrate: bool) -> anyhow::Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -131,9 +143,10 @@ pub async fn run_server(port: u16, no_calibrate: bool) -> anyhow::Result<()> {
 
     // Calibrate proving throughput on startup. This blocks the listener, so
     // /health stays unanswered until it completes — deliberate, since an
-    // estimate is useless before it, but billable on a short-lived pod.
-    if no_calibrate {
-        tracing::info!("Calibration skipped (--no-calibrate); /estimate will be unavailable");
+    // estimate is useless before it, but billable on a short-lived pod. Hence
+    // opt-in: most runs want the server answering immediately.
+    if !calibrate {
+        tracing::info!("Calibration off (pass --calibrate to enable); /estimate will be unavailable");
     } else {
         tracing::info!("Calibrating proving throughput...");
         let calibrate_state = state.clone();
@@ -183,7 +196,8 @@ pub async fn run_server(port: u16, no_calibrate: bool) -> anyhow::Result<()> {
         .route("/compress", post(submit_compress))
         .route("/jobs/:job_id", get(get_job_status))
         .route("/jobs/:job_id/receipt", get(get_job_receipt))
-        .route("/calibration", get(get_calibration));
+        .route("/calibration", get(get_calibration))
+        .route("/jobs/:job_id/cancel", post(cancel_job));
     if let Some(token) = auth_token {
         app = app.layer(middleware::from_fn(move |req: Request, next: Next| {
             let token = token.clone();
@@ -215,6 +229,60 @@ pub async fn run_server(port: u16, no_calibrate: bool) -> anyhow::Result<()> {
 }
 
 /// Health check endpoint
+/// POST /jobs/:job_id/cancel - Stop a job.
+///
+/// A queued job is dropped before it starts, which is the case that matters:
+/// it frees the worker for everything behind it.
+///
+/// A running job cannot be interrupted. risc0's `prove_session` proves the
+/// whole session in one call, and its per-segment hook returns `()`, so there
+/// is no cancellation point that does not involve unwinding through the
+/// prover — not worth the risk of leaving a CUDA context in a bad state to
+/// reclaim part of one proof. Such a job is marked cancelled, keeps running to
+/// completion, and has its receipt discarded. The GPU time is already spent;
+/// the honest way to reclaim it is to terminate the pod.
+async fn cancel_job(
+    State(state): State<Arc<ServerState>>,
+    Path(job_id): Path<String>,
+) -> impl IntoResponse {
+    let mut jobs = state.jobs.write().await;
+    let Some(job) = jobs.get_mut(&job_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Job not found".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    match job.status {
+        JobStatus::Complete | JobStatus::Failed | JobStatus::Cancelled => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: format!("job already {:?}", job.status),
+            }),
+        )
+            .into_response(),
+        JobStatus::Pending => {
+            job.cancel_requested = true;
+            job.status = JobStatus::Cancelled;
+            tracing::info!("Job {} cancelled before starting", job_id);
+            Json(serde_json::json!({ "cancelled": true, "was_running": false })).into_response()
+        }
+        JobStatus::Processing => {
+            job.cancel_requested = true;
+            tracing::info!("Job {} cancel requested while running", job_id);
+            Json(serde_json::json!({
+                "cancelled": true,
+                "was_running": true,
+                "note": "proof runs to completion; receipt discarded"
+            }))
+            .into_response()
+        }
+    }
+}
+
 /// GET /calibration - Measured proving throughput of this machine.
 ///
 /// The number that characterises a GPU for cost purposes: cost per proof is
@@ -289,6 +357,8 @@ async fn submit_prove(
         request: JobRequest::Prove(request),
         receipt: None,
         error: None,
+        progress: None,
+        cancel_requested: false,
     };
 
     // Add to queue
@@ -388,6 +458,8 @@ async fn submit_compress(
         request: JobRequest::Compress(input),
         receipt: None,
         error: None,
+        progress: None,
+        cancel_requested: false,
     };
 
     // Add to queue
@@ -428,6 +500,7 @@ async fn get_job_status(
                 job_type: job.job_type.clone(),
                 status: job.status.clone(),
                 error: job.error.clone(),
+                progress: job.progress.as_ref().map(|p| p.snapshot()),
             }),
         )
             .into_response(),
@@ -515,6 +588,11 @@ async fn run_worker(state: Arc<ServerState>, mut rx: mpsc::Receiver<String>) {
         let job_request = {
             let mut jobs = state.jobs.write().await;
             match jobs.get_mut(&job_id) {
+                // Cancelled while queued: never start it.
+                Some(job) if job.cancel_requested => {
+                    tracing::info!("Skipping cancelled job {}", job_id);
+                    None
+                }
                 Some(job) => {
                     job.status = JobStatus::Processing;
                     Some(job.request.clone())
@@ -537,7 +615,18 @@ async fn run_worker(state: Arc<ServerState>, mut rx: mpsc::Receiver<String>) {
             JobRequest::Prove(req) => {
                 let idx = req.idx();
                 tracing::info!("[#{}] Starting proof...", idx);
-                prover.prove(req)
+
+                // Publish the sink before proving so the status endpoint can
+                // read counters as segments land, rather than only once the
+                // receipt exists.
+                let sink = ProgressSink::new();
+                {
+                    let mut jobs = state.jobs.write().await;
+                    if let Some(job) = jobs.get_mut(&job_id) {
+                        job.progress = Some(sink.clone());
+                    }
+                }
+                prover.prove_with_progress(req, Some(sink))
             }
             JobRequest::Compress(input) => {
                 tracing::info!("Starting SNARK compression...");
@@ -549,11 +638,35 @@ async fn run_worker(state: Arc<ServerState>, mut rx: mpsc::Receiver<String>) {
         {
             let mut jobs = state.jobs.write().await;
             if let Some(job) = jobs.get_mut(&job_id) {
+                // Stop the progress clock before recording the outcome, so a
+                // finished job reports how long it took rather than how long
+                // ago it started.
+                if let Some(sink) = &job.progress {
+                    sink.finish();
+                }
                 match result {
+                    // Cancelled mid-proof: the work finished, but the caller no
+                    // longer wants it, so the receipt is dropped rather than
+                    // stored.
+                    Ok(receipt) if job.cancel_requested => {
+                        tracing::info!(
+                            "Job {} finished but was cancelled; discarding {} byte receipt",
+                            job_id,
+                            receipt.len()
+                        );
+                        job.status = JobStatus::Cancelled;
+                    }
                     Ok(receipt) => {
                         tracing::info!("Job {} complete ({} bytes)", job_id, receipt.len());
                         job.status = JobStatus::Complete;
                         job.receipt = Some(receipt);
+                    }
+                    // A cancelled job that then errored is still cancelled: the
+                    // caller asked for it to stop and does not want the failure
+                    // of work they abandoned reported back as a fault.
+                    Err(e) if job.cancel_requested => {
+                        tracing::info!("Job {} cancelled; it ended with: {}", job_id, e);
+                        job.status = JobStatus::Cancelled;
                     }
                     Err(e) => {
                         tracing::error!("Job {} failed: {}", job_id, e);

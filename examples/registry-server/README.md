@@ -69,8 +69,8 @@ All authenticated endpoints expect `Authorization: Bearer <key>` and return
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/health` | Liveness, and confirms the token is accepted |
-| GET | `/pending` | Get pending handles to stage |
-| POST | `/ack` | Acknowledge handles were staged |
+| GET | `/pending` | Get pending handles to stage; filters on `?space=` |
+| POST | `/ack` | Record the per-handle outcome subsd reached |
 | POST | `/committed` | Notify when handles are committed |
 
 The keys are separate because they have different blast radii: the subsd key
@@ -101,7 +101,9 @@ curl http://localhost:8080/status/alice@example
 ### Get pending handles (subsd)
 
 ```bash
+# subsd asks one space at a time; unscoped returns everything.
 curl -H "Authorization: Bearer $SUBSD_API_KEY" \
+  --get --data-urlencode "space=@example" \
   http://localhost:8080/pending
 ```
 
@@ -111,7 +113,10 @@ curl -H "Authorization: Bearer $SUBSD_API_KEY" \
 curl -X POST http://localhost:8080/ack \
   -H "Authorization: Bearer $SUBSD_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"handles": ["alice@example"]}'
+  -d '{"handles": [
+        {"handle": "alice@example", "outcome": "staged"},
+        {"handle": "bob@example",   "outcome": "already_committed_different_spk"}
+      ]}'
 ```
 
 ## Production Considerations

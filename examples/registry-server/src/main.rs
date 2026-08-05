@@ -31,7 +31,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -80,6 +80,7 @@ enum RegistrationStatus {
     Pending,    // Waiting to be pulled by subsd
     Staged,     // Pulled by subsd, waiting for commit
     Committed,  // On-chain
+    Rejected,   // subsd reported a terminal failure; see the ack outcome
 }
 
 #[tokio::main]
@@ -301,6 +302,7 @@ async fn get_status(
             RegistrationStatus::Pending => "pending",
             RegistrationStatus::Staged => "staged",
             RegistrationStatus::Committed => "committed",
+            RegistrationStatus::Rejected => "rejected",
         };
         Json(StatusResponse {
             handle: reg.handle.clone(),
@@ -328,25 +330,61 @@ struct PendingResponse {
 }
 
 /// GET /pending - Get pending handles for subsd to stage
-async fn get_pending_handles(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+#[derive(Deserialize)]
+struct PendingQuery {
+    /// The single space the caller is asking about, e.g. "@example".
+    /// Absent means unscoped: return everything, which is what a registry
+    /// written before scoping existed does by default.
+    space: Option<String>,
+}
+
+/// The space a handle belongs to: everything after the last '@'.
+fn handle_space(handle: &str) -> Option<String> {
+    handle.rsplit_once('@').map(|(_, space)| format!("@{}", space))
+}
+
+async fn get_pending_handles(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<PendingQuery>,
+) -> impl IntoResponse {
     let registrations = state.registrations.read().await;
 
     let pending: Vec<PendingHandle> = registrations
         .iter()
         .filter(|r| r.status == RegistrationStatus::Pending)
+        // Only hand over work for the space that was asked about. Without
+        // this, handles for a space subsd cannot act on come back on every
+        // cycle and are never acked, because they can never stage.
+        .filter(|r| match &q.space {
+            None => true,
+            Some(want) => handle_space(&r.handle).as_deref() == Some(want.as_str()),
+        })
+        // A real registry would paginate here; subsd stages a whole response
+        // in one pass, so capping the page and letting the next cycle collect
+        // the rest is the natural place to bound it.
         .map(|r| PendingHandle {
             handle: r.handle.clone(),
             script_pubkey: r.script_pubkey.clone(),
         })
         .collect();
 
-    tracing::info!("Returning {} pending handles", pending.len());
+    match &q.space {
+        Some(space) => tracing::info!("Returning {} pending handles for {}", pending.len(), space),
+        None => tracing::info!("Returning {} pending handles (unscoped)", pending.len()),
+    }
     Json(PendingResponse { handles: pending })
 }
 
 #[derive(Deserialize)]
+struct AckEntry {
+    handle: String,
+    /// Why the handle is settled. See REGISTRY.md; every value is terminal.
+    outcome: String,
+}
+
+#[derive(Deserialize)]
 struct AckRequest {
-    handles: Vec<String>,
+    handles: Vec<AckEntry>,
 }
 
 #[derive(Serialize)]
@@ -354,7 +392,12 @@ struct AckResponse {
     acknowledged: usize,
 }
 
-/// POST /ack - Acknowledge handles were staged by subsd
+/// POST /ack - Record the outcome subsd reached for each handle.
+///
+/// Every outcome is terminal, so all of them leave /pending. A real registry
+/// would branch here: `staged` is on its way, while the `*_different_spk` and
+/// `invalid` outcomes mean the request can never be fulfilled and the user
+/// should be told — and refunded, if they paid.
 async fn ack_handles(
     State(state): State<Arc<AppState>>,
     Json(req): Json<AckRequest>,
@@ -362,12 +405,36 @@ async fn ack_handles(
     let mut registrations = state.registrations.write().await;
     let mut count = 0;
 
-    for handle in &req.handles {
-        if let Some(reg) = registrations.iter_mut().find(|r| r.handle == *handle) {
+    for entry in &req.handles {
+        if let Some(reg) = registrations.iter_mut().find(|r| r.handle == entry.handle) {
             if reg.status == RegistrationStatus::Pending {
-                reg.status = RegistrationStatus::Staged;
+                reg.status = match entry.outcome.as_str() {
+                    "staged" | "already_staged_same_spk" => RegistrationStatus::Staged,
+                    // Already registered to the requested owner: the request is
+                    // fulfilled, not refused. Rejecting it would tell a paying
+                    // user their own handle was denied.
+                    "already_committed_same_spk" => RegistrationStatus::Committed,
+                    // Unfulfillable: taken by another script pubkey, or never
+                    // a valid handle. Parked as Rejected rather than Staged so
+                    // it isn't reported as in-flight forever.
+                    "already_committed_different_spk"
+                    | "already_staged_different_spk"
+                    | "invalid" => RegistrationStatus::Rejected,
+                    // An outcome this example predates. Treated as unfulfillable
+                    // so nothing is stuck pending, but listed separately from
+                    // the known-terminal arm above: a new outcome is a prompt to
+                    // read the table in REGISTRY.md, not to assume refusal.
+                    other => {
+                        tracing::warn!(
+                            "Handle {}: unrecognised outcome {:?}; treating as rejected",
+                            entry.handle,
+                            other
+                        );
+                        RegistrationStatus::Rejected
+                    }
+                };
                 count += 1;
-                tracing::info!("Handle {} acknowledged as staged", handle);
+                tracing::info!("Handle {} acked: {}", entry.handle, entry.outcome);
             }
         }
     }

@@ -11,65 +11,50 @@ work.
      (yours)                    (private)
 ```
 
-**subs always initiates.** The registry never calls subs, never needs to reach
-it, and never needs a public address for it. Your registry is an HTTP server
-that subs polls.
+**subs always initiates.** The registry never calls subs and never needs a
+public address for it. Your registry is an HTTP server that subs polls.
 
 ## Scope
 
-This document covers **only** the four endpoints subs calls. Everything else
-about your registry is yours to decide and subs neither sees nor cares about:
+This document covers **only** the four endpoints subs calls. Everything else is
+yours to decide and subs neither sees nor cares about: how requests get in, how
+you authenticate or bill the people making them, how you store or display them.
 
-- how handle requests get in — a public form, a paid checkout, an admin panel
-- how you authenticate, bill, or rate-limit the people making requests
-- how you store registrations, notify users, or expose status to them
-
-Implement the four endpoints below and subs will work with it.
 [`examples/registry-server`](examples/registry-server) is a working
-implementation you can run and read; the intake it happens to ship is
-illustrative, not part of this contract.
+implementation you can run and read.
 
 ---
 
 ## The cycle
 
-Each pass, subs:
+Each pass, per space, subs:
 
 1. `GET /pending` — collect handles awaiting registration
-2. stages them locally (validating and de-duplicating)
-3. `POST /ack` — report which ones it took
+2. stages them locally, validating and de-duplicating
+3. `POST /ack` — report what it took
 4. publishes certificates to the relay network
 
-Steps 1–3 are what your registry participates in. Step 4 is internal to subs.
-
-Later, when a batch is committed on-chain, subs can call
-[`POST /committed`](#post-committed) — that one is **not** automatic.
+Steps 1–3 involve your registry; step 4 is internal to subs. `POST /committed`
+fires separately and is **not** automatic.
 
 ---
 
 ## Authentication
 
-All four endpoints are authenticated with a single shared bearer token:
+All four endpoints take a single shared bearer token:
 
 ```
 Authorization: Bearer <token>
 ```
 
 Configure it in subs under **Settings → Registry Server → Auth Token**. Reject
-anything without a valid token with **`401`**. subs surfaces `401` and `403`
-distinctly from other failures, so an operator sees "registry rejected the auth
-token" rather than a generic upstream error.
+anything without a valid token with **`401`**; subs surfaces `401`/`403`
+distinctly, so an operator sees "registry rejected the auth token" rather than a
+generic upstream error.
 
-This token grants access to your work queue — reading pending handles and
-marking them staged or committed. If other systems of yours write to the
-registry, give them their own credentials; there's no reason for them to share
-the one subs holds.
-
-**`/health` is authenticated too**, deliberately. subs' **Test** button probes
-it, so a successful test proves both reachability *and* that the token is
-accepted — rather than showing green for a registry that will reject every
-request after it. If you need an open liveness probe for a load balancer,
-expose it on a path subs doesn't use.
+**`/health` is authenticated too.** subs' **Test** button probes it, so a
+successful test proves both reachability and that the token works. If you need
+an open liveness probe, expose it on a path subs doesn't use.
 
 ---
 
@@ -81,7 +66,24 @@ Return `200` with any body.
 
 ### `GET /pending`
 
-Return handles waiting to be staged.
+Return handles waiting to be staged. subs asks about **one space per request**:
+
+```
+GET /pending?space=@example
+GET /pending?space=%233438-1-0
+```
+
+**Return only handles in that space.** A handle for a space this operator cannot
+act on can never be staged, so it is never acked — serve it and it comes back
+every cycle, forever.
+
+The value is a canonical space label, percent-encoded; numeric spaces look like
+`#3438-1-0`, so `#` arrives as `%23`.
+
+Scope includes spaces **delegated to the operator's wallet but not yet
+started** — staging the first handle adopts such a space automatically. Scope is
+recomputed every cycle, so a new delegation takes effect without restarting
+subs.
 
 ```json
 {
@@ -99,31 +101,59 @@ Return handles waiting to be staged.
 
 Return `{"handles": []}` when there's nothing pending — not `404`.
 
-**Any non-2xx aborts the entire sync**, including the ack step, so nothing is
-staged that pass. subs retries on the next cycle. The request times out after
-10 seconds.
+**Any non-2xx aborts that space's sync**, including its ack, so nothing is
+staged for it that pass. subs retries next cycle. The request times out after 10
+seconds.
 
 Returning already-staged handles is harmless — subs de-duplicates — but
 filtering them keeps payloads small.
 
+**Pagination** is optional: return the full set for the space, or cap it and let
+the next cycle collect the rest. subs stages an entire response in one pass.
+Capping per space starves nothing, since each request covers one space.
+
 ### `POST /ack`
 
-Called after subs stages the handles it pulled.
+Called once subs has decided each handle's fate.
 
 ```json
-{ "handles": ["alice@example", "bob@example"] }
+{
+  "handles": [
+    { "handle": "alice@example", "outcome": "staged" },
+    { "handle": "bob@example",   "outcome": "already_committed_different_spk" }
+  ]
+}
 ```
 
 Move these out of your pending set. Return `2xx`; the body is ignored.
 
-**This must be idempotent.** subs acks every handle it pulled, including ones
-already staged locally, and re-acks after a failure. Re-acking an
-already-acked handle must succeed, not error.
+**Every outcome is terminal** — a handle appears here only once settled, and
+will not be offered again.
 
-If the ack fails, subs logs it and continues — staging already succeeded on its
-side. Your registry still has those handles pending, so the next cycle
-re-pulls, re-stages (a no-op), and re-acks. **The flow self-heals, but only if
-`/ack` is idempotent.**
+| Outcome | Meaning | What to tell the user |
+|---|---|---|
+| `staged` | Accepted; awaiting commitment | In progress |
+| `already_staged_same_spk` | Already pending under the same owner | In progress — a duplicate request |
+| `already_committed_same_spk` | Already registered to this owner | Already theirs |
+| `already_staged_different_spk` | Another owner has it pending | **Cannot be fulfilled** |
+| `already_committed_different_spk` | Another owner already holds it | **Cannot be fulfilled** |
+| `invalid` | Not a parseable `name@space` handle | **Cannot be fulfilled** |
+
+The last three can never succeed, however many times they are retried. If you
+take payment, they are your refund signal.
+
+**This must be idempotent.** If the ack fails, subs logs it and continues —
+staging already happened on its side — so the next cycle re-pulls, re-stages (a
+no-op) and re-acks. The flow self-heals, but only if re-acking succeeds rather
+than errors.
+
+#### Retryable failures
+
+Some handles are neither staged nor settled: subs could not reach a decision,
+typically because the space could not be loaded or the wallet could not operate
+it. These are **deliberately absent** from the ack body. They stay in
+`/pending`, and a later cycle picks them up once the operator's configuration is
+fixed. Acking them would mark them done and lose them.
 
 ### `POST /committed`
 
@@ -134,47 +164,30 @@ re-pulls, re-stages (a no-op), and re-acks. **The flow self-heals, but only if
 Mark these committed and record the root. Return `2xx`.
 
 **This is not automatic.** It fires only when someone calls
-`POST /registry/notify` on subs with a `space` and `root`; nothing triggers it
-on a timer. If you need committed state and aren't calling `/registry/notify`,
-track it by watching the chain or by querying the relay network for the
-handle's certificate.
+`POST /registry/notify` on subs with a `space` and `root`. If you need committed
+state and aren't calling that, track it by watching the chain or by querying the
+relay network for the handle's certificate.
 
 ---
 
 ## Delivery semantics
 
 **At-least-once, never exactly-once.** A handle may be delivered more than once
-— an ack that fails after subs staged the handle is the ordinary case. Design
-so a repeat delivery is a no-op.
+— an ack that fails after subs staged the handle is the ordinary case. Design so
+a repeat delivery is a no-op.
 
-**subs is the source of truth for what is registered**, not your registry.
-`/ack` means subs accepted a handle into staging; it does not mean the handle
-is committed on-chain. Only the commit notification means that.
+**subs is the source of truth for what is registered**, not your registry. An
+ack of `staged` means subs accepted the handle into staging; it does not mean
+the handle is committed on-chain. Only the commit notification means that.
 
 ---
 
 ## Handle validation
 
-`handle` must parse as a spaces name in `name@space` form. Handles that don't
-parse are **skipped and never acked** — so they stay pending on your side and
-are re-pulled on every cycle, forever.
-
-Validate at intake. A malformed handle accepted into your pending queue becomes
-a permanent poison entry.
-
-subs may also decline to stage a well-formed handle:
-
-| Reason | Meaning |
-|---|---|
-| `already staged` | Same handle and script pubkey already pending locally |
-| `already committed` | Already committed on-chain |
-| `already staged with different spk` | Conflicts with a pending entry under a different owner |
-| `already committed with different spk` | The handle is taken |
-
-These are logged by subs and **still acked** — they're settled outcomes, not
-retryable failures. The last two mean the request cannot be fulfilled; your
-registry has no way to learn this today, so surfacing it to users requires
-polling on-chain state yourself.
+`handle` must parse as a spaces name in `name@space` form. One that doesn't is
+acked `invalid` and settled immediately, so it won't linger in your queue — but
+validate at intake anyway. A malformed handle that reaches `/pending` has
+already cost a round trip and, if you charged for it, a refund.
 
 ---
 
@@ -191,9 +204,10 @@ In subs' **Settings → Registry Server**:
 With automatic sync **off**, the cycle runs only on **Sync Now** (or
 `POST /registry/sync`).
 
-With it **on**, subs runs continuously: every 30 seconds when idle, every 5
-seconds while certificates remain to publish. It defaults to off because
-publishing broadcasts to the relay network.
+With it **on**, subs sleeps 2 seconds *after* each cycle finishes rather than
+running on a fixed schedule, so cycles never overlap and a slow one simply
+delays the next. It defaults to off because publishing broadcasts to the relay
+network.
 
 ---
 
@@ -202,7 +216,11 @@ publishing broadcasts to the relay network.
 - [ ] `/health`, `/pending`, `/ack`, `/committed` all require the bearer token
 - [ ] Missing or wrong token returns `401`
 - [ ] `GET /pending` returns the documented shape, `{"handles": []}` when empty
-- [ ] `POST /ack` is idempotent and returns `2xx` for already-acked handles
+- [ ] `GET /pending` filters on `?space=`
+- [ ] `GET /pending` includes spaces delegated to the operator but not yet started
+- [ ] `POST /ack` reads a per-handle `outcome` and is idempotent
+- [ ] The `*_different_spk` and `invalid` outcomes are surfaced to the user, and refunded if paid
+- [ ] Handles absent from an ack stay pending — they are retryable, not settled
 - [ ] Handles are validated as `name@space` **at intake**
 - [ ] Repeat delivery of the same handle is a no-op
 - [ ] `POST /committed` implemented, if you need committed state

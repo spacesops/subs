@@ -6,12 +6,20 @@ pub mod server;
 
 use std::time::Instant;
 
+pub mod progress;
+
 use anyhow::{anyhow, Result};
+use std::sync::Arc;
 use libveritas::constants::{FOLD_ELF, FOLD_ID, STEP_ELF, STEP_ID};
 use libveritas_zk::guest::Commitment;
-use risc0_zkvm::{default_executor, default_prover, ExecutorEnv, ProverOpts, Receipt};
+use risc0_zkvm::{
+    default_executor, default_prover, get_prover_server, ExecutorEnv, ExecutorImpl, ProverOpts,
+    Receipt, VerifierContext,
+};
 use spacedb::{NodeHasher, Sha256Hasher};
 use spacedb::subtree::{ProofType, SubTree, ValueOrHash};
+pub use crate::progress::{JobProgress, ProgressSink};
+use crate::progress::SegmentProgress;
 use subs_types::{CalibrationInfo, CompressInput, EstimateResult, ProvingRequest, SegmentEstimate};
 
 /// Build a synthetic ProvingRequest::Step for benchmarking/calibration.
@@ -82,13 +90,22 @@ impl Prover {
 
     /// Prove a ProvingRequest and return the serialized receipt.
     pub fn prove(&self, request: &ProvingRequest) -> Result<Vec<u8>> {
+        self.prove_with_progress(request, None)
+    }
+
+    /// Prove, reporting progress into `sink` as segments complete.
+    pub fn prove_with_progress(
+        &self,
+        request: &ProvingRequest,
+        sink: Option<Arc<ProgressSink>>,
+    ) -> Result<Vec<u8>> {
         match request {
             ProvingRequest::Step {
                 idx,
                 exclusion_proof,
                 zk_batch,
                 ..
-            } => self.prove_step(*idx, exclusion_proof, zk_batch),
+            } => self.prove_step_inner(*idx, exclusion_proof, zk_batch, sink),
             ProvingRequest::Fold {
                 idx,
                 acc_receipt,
@@ -96,17 +113,70 @@ impl Prover {
                 step_receipt,
                 step_commitment,
                 ..
-            } => self.prove_fold(
+            } => self.prove_fold_inner(
                 *idx,
                 acc_receipt,
                 acc_commitment,
                 step_receipt,
                 step_commitment,
+                sink,
             ),
         }
     }
 
-    fn prove_step(&self, idx: usize, exclusion_proof: &[u8], zk_batch: &[u8]) -> Result<Vec<u8>> {
+    /// Execute, publish the session facts, then prove — reporting each segment.
+    ///
+    /// This is the same split risc0 performs internally: `prove_with_opts`
+    /// resolves to `ExecutorImpl::from_elf(env, elf).run()` followed by
+    /// `prove_session`, with the same opts on the same prover server. Doing it
+    /// explicitly changes nothing about the receipt; it only makes the session
+    /// visible so cycle counts and segment progress can be reported while the
+    /// job is still running, instead of arriving with the receipt.
+    ///
+    /// Note this proves in-process via `get_prover_server`, so unlike
+    /// `default_prover` it ignores RISC0_PROVER and BONSAI_API_*. That is the
+    /// intent — this binary *is* the prover a client dials — but it means
+    /// setting those env vars will not redirect proving elsewhere.
+    fn prove_session_with_progress(
+        &self,
+        idx: usize,
+        env: ExecutorEnv<'_>,
+        elf: &[u8],
+        sink: Option<Arc<ProgressSink>>,
+    ) -> Result<Receipt> {
+        let opts = ProverOpts::succinct();
+
+        let mut session = ExecutorImpl::from_elf(env, elf)
+            .map_err(|e| anyhow!("[#{}] executor init: {}", idx, e))?
+            .run()
+            .map_err(|e| anyhow!("[#{}] execute failed: {}", idx, e))?;
+
+        if let Some(sink) = &sink {
+            // Published before proving starts: the segment count and cycle
+            // total are the whole point of reporting early.
+            sink.on_session_ready(session.user_cycles, session.segments.len());
+            session.add_hook(SegmentProgress::new(sink.clone()));
+        }
+
+        let ctx = VerifierContext::default().with_dev_mode(opts.dev_mode());
+        let prover = get_prover_server(&opts)
+            .map_err(|e| anyhow!("[#{}] prover server: {}", idx, e))?;
+
+        let info = prover
+            .prove_session(&ctx, &session)
+            .map_err(|e| anyhow!("[#{}] prove failed: {}", idx, e))?;
+
+        Ok(info.receipt)
+    }
+
+
+    fn prove_step_inner(
+        &self,
+        idx: usize,
+        exclusion_proof: &[u8],
+        zk_batch: &[u8],
+        sink: Option<Arc<ProgressSink>>,
+    ) -> Result<Vec<u8>> {
         let env = ExecutorEnv::builder()
             .write(&(
                 exclusion_proof.to_vec(),
@@ -118,23 +188,22 @@ impl Prover {
             .build()
             .map_err(|e| anyhow!("[#{}] env build: {}", idx, e))?;
 
-        let prove_info = default_prover()
-            .prove_with_opts(env, STEP_ELF, &ProverOpts::succinct())
-            .map_err(|e| anyhow!("[#{}] prove step failed: {}", idx, e))?;
+        let receipt = self.prove_session_with_progress(idx, env, STEP_ELF, sink)?;
 
-        let receipt_bytes = borsh::to_vec(&prove_info.receipt)
+        let receipt_bytes = borsh::to_vec(&receipt)
             .map_err(|e| anyhow!("[#{}] serialize receipt: {}", idx, e))?;
 
         Ok(receipt_bytes)
     }
 
-    fn prove_fold(
+    fn prove_fold_inner(
         &self,
         idx: usize,
         acc_receipt: &[u8],
         acc_commitment: &Commitment,
         step_receipt: &[u8],
         step_commitment: &Commitment,
+        sink: Option<Arc<ProgressSink>>,
     ) -> Result<Vec<u8>> {
         let acc: Receipt = borsh::from_slice(acc_receipt)
             .map_err(|e| anyhow!("deserialize acc receipt: {}", e))?;
@@ -149,11 +218,11 @@ impl Prover {
             .build()
             .map_err(|e| anyhow!("[#{}] env build: {}", idx, e))?;
 
-        let prove_info = default_prover()
-            .prove_with_opts(env, FOLD_ELF, &ProverOpts::succinct())
-            .map_err(|e| anyhow!("[#{}] fold prove failed: {}", idx, e))?;
+        // Same instrumented path as the step half. Assumption resolution lives
+        // inside prove_session, which is all prove_with_opts would have added.
+        let receipt = self.prove_session_with_progress(idx, env, FOLD_ELF, sink)?;
 
-        let receipt_bytes = borsh::to_vec(&prove_info.receipt)
+        let receipt_bytes = borsh::to_vec(&receipt)
             .map_err(|e| anyhow!("[#{}] serialize receipt: {}", idx, e))?;
 
         Ok(receipt_bytes)

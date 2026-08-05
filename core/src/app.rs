@@ -185,9 +185,24 @@ impl LiveSpaceInfo {
         }
 
         let sub = name.subspace().unwrap();
+
+        // Split the two tree operations. Both resolve a snapshot by root and
+        // then walk the tree, so when a cert is slow this says which half —
+        // the membership check or the inclusion proof — is responsible.
+        let lookup_started = std::time::Instant::now();
         let is_final = self.local.lookup_handle_in_tree(&sub, tip).await?.is_some();
+        let lookup_ms = lookup_started.elapsed().as_millis();
+
         if is_final {
-            return self.local.issue_cert(&name, tip.unwrap()).await;
+            let proof_started = std::time::Instant::now();
+            let cert = self.local.issue_cert(&name, tip.unwrap()).await;
+            log::debug!(
+                "  {} final: lookup {}ms, proof {}ms",
+                name,
+                lookup_ms,
+                proof_started.elapsed().as_millis()
+            );
+            return cert;
         }
 
         // temp cert
@@ -255,7 +270,51 @@ pub struct Operator {
     fabric: Option<Fabric>,
     fabric_seeds: Vec<String>,
     spaces: Arc<Mutex<HashMap<SLabel, Arc<LocalSpace>>>>,
+    /// Last measured (certificates, message bytes) per space.
+    ///
+    /// Sizing is driven by the serialized message rather than a model of its
+    /// parts. A message is one root certificate carrying a ~250 KB recursive
+    /// receipt plus ~1 KB handle certificates, wrapped in framing and a chain
+    /// proof — so any per-certificate average describes none of it, and a
+    /// model built from parts drifts from what the relay actually measures.
+    /// Scaling from the whole is correct whichever component grows.
+    ///
+    /// Not persisted: a restart falls back to a pessimistic default and the
+    /// first batch replaces it with a real measurement.
+    last_message: Arc<Mutex<HashMap<SLabel, (usize, usize)>>>,
 }
+
+/// Outcome of submitting a batch.
+///
+/// Carries the measurement even when nothing was sent, which is the point: a
+/// batch refused for being oversized must still teach the next one its size,
+/// or the same batch is rebuilt and refused forever.
+#[derive(Debug, Clone, Copy)]
+pub struct SubmitOutcome {
+    pub cert_count: usize,
+    pub message_bytes: usize,
+    /// False when the message was built and measured but deliberately not
+    /// broadcast. Distinct from an `Err`, which means something failed —
+    /// a network blip must not be mistaken for a sizing problem, or repeated
+    /// blips would ratchet the batch down with nothing to grow it back.
+    pub sent: bool,
+}
+
+/// Largest message a relay accepts, matching certrelay's default
+/// `max_message_size`. A relay may be configured lower, which we cannot see.
+const RELAY_MAX_MESSAGE_BYTES: usize = 512 * 1024;
+
+/// Fraction of that budget to aim for, leaving room for batch-to-batch
+/// variation between the measurement and the next send.
+const RELAY_BUDGET_PERCENT: usize = 85;
+
+/// Batch size assumed before anything has been measured.
+///
+/// Pessimistic on purpose: measured messages are ~50% of the limit at 50
+/// certificates, so this is safe by a wide margin. Too small merely costs one
+/// undersized batch after a restart; too large costs a refused one. Being
+/// wrong in the cheap direction is what makes persistence unnecessary.
+const ASSUMED_BATCH: usize = 50;
 
 impl Operator {
     /// Create a new Operator with RPC client.
@@ -270,6 +329,7 @@ impl Operator {
             wallet: wallet.into(),
             rpc: Some(rpc),
             spaces: Arc::new(Mutex::new(HashMap::new())),
+            last_message: Arc::new(Mutex::new(HashMap::new())),
             fabric: None,
             fabric_seeds: Vec::new(),
         }
@@ -286,6 +346,7 @@ impl Operator {
             fabric: None,
             fabric_seeds: Vec::new(),
             spaces: Arc::new(Mutex::new(HashMap::new())),
+            last_message: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -978,6 +1039,16 @@ impl Operator {
         local_space.save_estimate(commitment_id, estimate_json).await
     }
 
+    /// Drop a commitment's estimate once the proof it described has finished.
+    ///
+    /// The next proof of the same commitment is a different shape — a fold is
+    /// not a step — so leaving the old figures visible presents them as a
+    /// forecast for work they say nothing about.
+    pub async fn clear_estimate(&self, space: &SLabel, commitment_id: i64) -> anyhow::Result<()> {
+        let local_space = self.get_local_space(space)?;
+        local_space.clear_estimate(commitment_id).await
+    }
+
     /// Get input for SNARK compression.
     pub async fn get_compress_input(
         &self,
@@ -1147,7 +1218,7 @@ impl Operator {
 
         // No commitments yet - show message based on staged count
         let Some(commitment) = commitment else {
-            let unpublished = storage.select_handles(crate::storage::HandleSelector::Unpublished(None)).await?.len();
+            let unpublished = storage.count_unpublished(None).await?;
             let message = if staged_count > 0 {
                 Some(format!(
                     "{} handle(s) staged. Ready to commit.",
@@ -1316,7 +1387,7 @@ impl Operator {
         if let Some(_) = confirmed_idx {
             storage.reset_stale_temp_certs(Some(&commitment.root)).await?;
         }
-        let unpublished = storage.select_handles(crate::storage::HandleSelector::Unpublished(confirmed_idx)).await?.len();
+        let unpublished = storage.count_unpublished(confirmed_idx).await?;
 
         let commitments = storage.list_commitments().await?;
         let pending_proofs = crate::core::count_pending_proofs(&commitments);
@@ -1382,23 +1453,98 @@ impl Operator {
         Ok(new_txid)
     }
 
-    pub async fn submit_certs(&self, certs: Vec<Certificate>) -> anyhow::Result<()> {
-        log::info!("submit_certs: building message for {} certs", certs.len());
+    pub async fn submit_certs(&self, certs: Vec<Certificate>) -> anyhow::Result<SubmitOutcome> {
+        let count = certs.len();
+        log::info!("submit_certs: building message for {} certs", count);
+
         let msg = self.build_message(certs).await?;
-        log::info!("submit_certs: message built, broadcasting via fabric");
         let fabric = self.require_fabric()?;
         let relays = fabric
             .bootstrap()
             .await
             .map_err(|e| anyhow!("fabric bootstrap error: {}", e))?;
 
-        log::info!("relays available: {:?}", relays);
+        let bytes = msg.to_bytes();
+
+        // Relays reject a message over max_message_size outright, so batch
+        // size is bounded by bytes rather than by count. Logging the measured
+        // size is what makes that budget legible: certificate size grows with
+        // tree depth, so a batch that fits today can stop fitting as the space
+        // grows.
+        log::info!(
+            "submit_certs: {} certs = {} bytes, {:.1}% of the {} KB relay limit",
+            count,
+            bytes.len(),
+            bytes.len() as f64 / RELAY_MAX_MESSAGE_BYTES as f64 * 100.0,
+            RELAY_MAX_MESSAGE_BYTES / 1024,
+        );
+
+        // Refuse rather than let the relay reject it. Returned as Ok, not Err,
+        // so the caller can tell "measured and declined" from "something
+        // failed" — the measurement is what shrinks the next batch, and a
+        // network error must not be read as a size problem.
+        if bytes.len() > RELAY_MAX_MESSAGE_BYTES {
+            log::warn!(
+                "submit_certs: {} bytes exceeds the {} KB relay limit; not sending",
+                bytes.len(),
+                RELAY_MAX_MESSAGE_BYTES / 1024,
+            );
+            return Ok(SubmitOutcome {
+                cert_count: count,
+                message_bytes: bytes.len(),
+                sent: false,
+            });
+        }
+
+        log::debug!("relays available: {:?}", relays);
         fabric
-            .broadcast(&msg.to_bytes())
+            .broadcast(&bytes)
             .await
             .map_err(|e| anyhow!("Could not broadcast message: {}", e))?;
         log::info!("submit_certs: broadcast OK");
-        Ok(())
+        Ok(SubmitOutcome {
+            cert_count: count,
+            message_bytes: bytes.len(),
+            sent: true,
+        })
+    }
+
+    /// How many certificates to put in the next batch for this space.
+    ///
+    /// Scaled from the last message's measured size, so it converges in one
+    /// cycle whichever component grew — root certificate, handle certificates,
+    /// framing or chain proof. Falls back to a conservative assumption when
+    /// nothing has been measured yet.
+    ///
+    /// `ceiling` is a sanity cap, not a target: bytes decide the batch, and a
+    /// ceiling set near the expected size would silently prevent it growing.
+    fn next_batch_size(&self, space: &SLabel, ceiling: usize) -> usize {
+        let target = RELAY_MAX_MESSAGE_BYTES * RELAY_BUDGET_PERCENT / 100;
+
+        let scaled = match self.last_message.lock().unwrap().get(space) {
+            Some(&(certs, bytes)) if certs > 0 && bytes > 0 => {
+                // Certificates per byte, applied to the budget. Integer maths
+                // deliberately rounds down.
+                (certs * target / bytes).max(1)
+            }
+            _ => ASSUMED_BATCH,
+        };
+
+        scaled.min(ceiling).max(1)
+    }
+
+    /// Record what a batch of this size actually serialized to.
+    ///
+    /// Called before the message is sent — and regardless of whether it is —
+    /// so a batch refused for being oversized still teaches the next one.
+    fn record_message_size(&self, space: &SLabel, outcome: &SubmitOutcome) {
+        if outcome.cert_count == 0 || outcome.message_bytes == 0 {
+            return;
+        }
+        self.last_message
+            .lock()
+            .unwrap()
+            .insert(space.clone(), (outcome.cert_count, outcome.message_bytes));
     }
 
     pub async fn build_message(&self, certs: Vec<Certificate>) -> anyhow::Result<Message> {
@@ -1493,17 +1639,49 @@ impl Operator {
 
         for space_data in space_datas {
             let space = SName::from_space(&space_data.info.space);
+
+            let root_started = std::time::Instant::now();
             let root_cert = space_data
                 .info
                 .issue_cert(rpc, &self.wallet, &space)
                 .await?;
+            log::debug!(
+                "[{}] root cert issued in {}ms",
+                space_data.info.space,
+                root_started.elapsed().as_millis()
+            );
             certs.push(root_cert);
+
+            // Per-handle timing. Certificate issuance dominates publishing, and
+            // the cost per handle is what tells you whether a change actually
+            // helped — a batch total hides which handles were slow and folds in
+            // fixed per-batch work.
+            let batch_started = std::time::Instant::now();
+            let mut slowest_ms = 0u128;
+            let count = space_data.handles.len();
+
             for handle in space_data.handles {
+                let started = std::time::Instant::now();
                 let cert = space_data
                     .info
                     .issue_cert(rpc, &self.wallet, &handle)
                     .await?;
+                let ms = started.elapsed().as_millis();
+                slowest_ms = slowest_ms.max(ms);
+                log::debug!("[{}] cert for {} in {}ms", space_data.info.space, handle, ms);
                 certs.push(cert);
+            }
+
+            if count > 0 {
+                let total = batch_started.elapsed();
+                log::info!(
+                    "[{}] issued {} certs in {}ms ({:.1}ms/cert, slowest {}ms)",
+                    space_data.info.space,
+                    count,
+                    total.as_millis(),
+                    total.as_millis() as f64 / count as f64,
+                    slowest_ms,
+                );
             }
         }
 
@@ -1537,19 +1715,42 @@ impl Operator {
             log::info!("[{}] Reset {} stale temp cert(s) for republishing", space, reset);
         }
 
-        let all_handles = storage.select_handles(
-            if only.is_empty() {
-                crate::storage::HandleSelector::Unpublished(confirmed_idx)
+        // A relay rejects an oversized message outright, so the caller's limit
+        // is an upper bound rather than the batch size: what actually fits is
+        // derived from the last message this space produced.
+        let limit = if only.is_empty() {
+            let sized = self.next_batch_size(space, limit);
+            if sized != limit {
+                log::debug!("[{}] batch sized to {} (ceiling {})", space, sized, limit);
+            }
+            sized
+        } else {
+            // An explicit handle list is the caller's choice; honour it and
+            // let the size guard catch it if it is too large.
+            limit
+        };
+
+        // Only the batch is fetched. `total` comes from a COUNT so the caller
+        // still learns how much is left without paying to materialise it.
+        let batch: Vec<_> = storage
+            .select_handles(if only.is_empty() {
+                crate::storage::HandleSelector::Unpublished(confirmed_idx, Some(limit))
             } else {
                 crate::storage::HandleSelector::ByName(only.to_vec())
-            }
-        ).await?;
-        if all_handles.is_empty() {
+            })
+            .await?
+            .into_iter()
+            .take(limit)
+            .collect();
+        if batch.is_empty() {
             return Ok((0, 0));
         }
 
-        let total = all_handles.len();
-        let batch: Vec<_> = all_handles.into_iter().take(limit).collect();
+        let total = if only.is_empty() {
+            storage.count_unpublished(confirmed_idx).await?
+        } else {
+            batch.len()
+        };
 
         let handle_names: Vec<SName> = batch
             .iter()
@@ -1559,7 +1760,25 @@ impl Operator {
 
         let count = handle_names.len();
         let certs = self.issue_certs(handle_names).await?;
-        self.submit_certs(certs).await?;
+
+        let outcome = self.submit_certs(certs).await?;
+        // Recorded whether or not it was sent: a refused batch is exactly the
+        // case that must inform the next one, or the same oversized batch is
+        // rebuilt and refused forever.
+        self.record_message_size(space, &outcome);
+
+        if !outcome.sent {
+            // Nothing is marked published, so these handles are picked up
+            // again next cycle — by then sized from the measurement above.
+            log::warn!(
+                "[{}] batch of {} produced a {} byte message and was not sent; \
+                 retrying smaller",
+                space,
+                outcome.cert_count,
+                outcome.message_bytes,
+            );
+            return Ok((0, total));
+        }
 
         // Determine temp vs final per handle based on confirmed idx
         let mut temp_names = Vec::new();
@@ -1581,8 +1800,17 @@ impl Operator {
         }
         if !final_names.is_empty() {
             storage.mark_handles_published(&final_names, "final", None).await?;
-            // If no more committed handles need publishing, mark commitment as published
-            if storage.select_handles(crate::storage::HandleSelector::Unpublished(confirmed_idx)).await?.iter().all(|h| h.commitment_root.is_none()) {
+            // If no more committed handles need publishing, mark commitment as
+            // published. Only the first page is examined: the predicate is
+            // "does any committed handle remain", so one counter-example is
+            // enough and scanning the whole backlog to learn it was waste.
+            let remaining = storage
+                .select_handles(crate::storage::HandleSelector::Unpublished(
+                    confirmed_idx,
+                    Some(limit.max(1)),
+                ))
+                .await?;
+            if remaining.iter().all(|h| h.commitment_root.is_none()) {
                 if let Some(commitment) = storage.get_last_commitment().await? {
                     if commitment.published_at.is_none() {
                         storage.mark_commitment_published(commitment.id).await?;

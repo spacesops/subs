@@ -108,6 +108,19 @@ async fn registry_loop(state: AppState) {
                 .await
             {
                 Ok((0, 0)) => {}
+                // Nothing published but work remains: the batch was built and
+                // measured, then declined for exceeding the relay's message
+                // limit. submit_certs has already logged the size and recorded
+                // it, so the next pass rebuilds a smaller one — saying
+                // "Published 0" here would read as a stall rather than a resize.
+                Ok((0, remaining)) => {
+                    sent_any = true;
+                    tracing::debug!(
+                        "[{}] Batch declined as oversized, {} cert(s) still pending",
+                        space,
+                        remaining
+                    );
+                }
                 Ok((published, remaining)) => {
                     sent_any = true;
                     tracing::info!(
@@ -179,6 +192,14 @@ async fn proving_loop(state: AppState) {
                 match poll_job(&state, &prover_endpoint, prover_auth_token.as_deref(), space, &job_key, &job_id, commitment_id, is_fold).await {
                     Ok(true) => {
                         tracing::info!("[{}] Proof complete for commitment {}", space, commitment_id);
+                        // The estimate described the proof that just finished.
+                        // A commitment holds only one, so leaving it would show
+                        // the completed step's figures beside a Prove button
+                        // offering the fold — a different shape of work.
+                        // Cleared here; the loop refetches for whatever is next.
+                        if let Err(e) = state.operator.clear_estimate(space, commitment_id).await {
+                            tracing::debug!("[{}] Could not clear estimate: {}", space, e);
+                        }
                     }
                     Ok(false) => {}
                     Err(e) => {
@@ -186,10 +207,13 @@ async fn proving_loop(state: AppState) {
                     }
                 }
             } else {
-                // Only fetch and store the estimate; proving is user-initiated via the UI
-                if let Err(e) = fetch_and_store_estimate(&state, &prover_endpoint, prover_auth_token.as_deref(), space, commitment_id, &request).await {
-                    tracing::debug!("[{}] Could not fetch estimate: {}", space, e);
-                }
+                // Estimate fetching is disabled along with its UI. It ran on
+                // every pass — unguarded — and /estimate executes the guest to
+                // count cycles, so an unproven commitment re-executed it every
+                // 10s indefinitely, for a figure nothing renders and that read
+                // ~43% low anyway (calibration measures composite(), real jobs
+                // run succinct()). Re-enable together with the display.
+                let _ = &request;
             }
         }
 
@@ -199,6 +223,11 @@ async fn proving_loop(state: AppState) {
 }
 
 /// Fetch a proving estimate from the prover and store it on the commitment.
+///
+/// Currently unused: see the call site in the proving loop for why estimates
+/// are off. Kept so re-enabling is a one-line change once calibration measures
+/// the phase real jobs actually run.
+#[allow(dead_code)]
 async fn fetch_and_store_estimate(
     state: &AppState,
     prover_endpoint: &str,

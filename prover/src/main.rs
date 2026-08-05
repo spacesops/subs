@@ -40,14 +40,15 @@ struct Cli {
     #[arg(long, default_value = "8888")]
     server_port: u16,
 
-    /// Skip startup calibration (for --server mode).
+    /// Run startup calibration (for --server mode).
     ///
     /// Calibration proves a small batch to measure throughput, and the server
     /// does not accept connections until it finishes — including /health. On a
-    /// short-lived GPU pod that delay is billed on every cold start, so skip it
-    /// when estimates aren't needed. Also settable via PROVER_NO_CALIBRATE.
+    /// short-lived GPU pod that delay is billed on every cold start, so it is
+    /// off by default and only worth paying for when /estimate is wanted.
+    /// Also settable via PROVER_CALIBRATE.
     #[arg(long)]
-    no_calibrate: bool,
+    calibrate: bool,
 
     #[command(subcommand)]
     cmd: Option<Commands>,
@@ -89,9 +90,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.server {
-        let no_calibrate = cli.no_calibrate
-            || std::env::var("PROVER_NO_CALIBRATE").is_ok_and(|v| !v.is_empty() && v != "0");
-        subs_prover::server::run_server(cli.server_port, no_calibrate).await?;
+        let calibrate = cli.calibrate
+            || std::env::var("PROVER_CALIBRATE").is_ok_and(|v| !v.is_empty() && v != "0");
+        subs_prover::server::run_server(cli.server_port, calibrate).await?;
         return Ok(());
     }
 
