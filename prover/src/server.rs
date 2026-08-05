@@ -126,7 +126,7 @@ pub struct ErrorResponse {
 /// lower ceiling is the one that 413s.
 const MAX_BODY_BYTES: usize = 512 * 1024 * 1024;
 
-pub async fn run_server(port: u16, no_calibrate: bool) -> anyhow::Result<()> {
+pub async fn run_server(port: u16, calibrate: bool) -> anyhow::Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -143,9 +143,10 @@ pub async fn run_server(port: u16, no_calibrate: bool) -> anyhow::Result<()> {
 
     // Calibrate proving throughput on startup. This blocks the listener, so
     // /health stays unanswered until it completes — deliberate, since an
-    // estimate is useless before it, but billable on a short-lived pod.
-    if no_calibrate {
-        tracing::info!("Calibration skipped (--no-calibrate); /estimate will be unavailable");
+    // estimate is useless before it, but billable on a short-lived pod. Hence
+    // opt-in: most runs want the server answering immediately.
+    if !calibrate {
+        tracing::info!("Calibration off (pass --calibrate to enable); /estimate will be unavailable");
     } else {
         tracing::info!("Calibrating proving throughput...");
         let calibrate_state = state.clone();
