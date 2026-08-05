@@ -229,6 +229,10 @@ let currentPipeline = null;
 // boolean so it can be cleared and re-armed on every pass: a flag that is only
 // ever set true stops the chain after a single tick.
 let pipelinePollTimer = null;
+// Last rendered step, so a transition always gets one more render. Without it
+// the poll disarms on entering a state it does not watch — e.g. proving ->
+// broadcast — leaving the finished proof's UI frozen on screen.
+let lastPipelineStep;
 let currentFilter = null;
 let searchTimeout = null;
 let selectedHandles = new Set();
@@ -309,11 +313,18 @@ async function refreshPipeline() {
             clearTimeout(pipelinePollTimer);
             pipelinePollTimer = null;
         }
+        const stepChanged = lastPipelineStep !== undefined && lastPipelineStep !== j.current_step;
+        lastPipelineStep = j.current_step;
+
         if ((j.steps && j.steps.proving === 'in_progress' && j.prover_configured)
+            || j.proving_job_active
             || j.current_step === 'confirmed'
             || j.current_step === 'finalized'
             || j.current_step === 'published'
-            || (j.unpublished || 0) > 0) {
+            || (j.unpublished || 0) > 0
+            // One more pass after any transition, so the state we just left is
+            // never what stays on screen.
+            || stepChanged) {
             pipelinePollTimer = setTimeout(refreshPipeline, 5000);
         }
 
@@ -408,6 +419,103 @@ function renderStepper(r) {
     $('pipelineStepper').innerHTML = h;
 }
 
+function fmtDuration(sec) {
+    if (sec == null) return null;
+    const total = Math.max(0, Math.round(sec));
+    const unit = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+    if (total < 60) return unit(total, 'second');
+
+    const mins = Math.floor(total / 60);
+    const secs = total % 60;
+    if (mins < 60) {
+        // Seconds stop mattering once it is a long wait.
+        return mins >= 10 || secs === 0
+            ? unit(mins, 'minute')
+            : `${unit(mins, 'minute')} ${unit(secs, 'second')}`;
+    }
+
+    const hours = Math.floor(mins / 60);
+    const remMins = mins % 60;
+    return remMins === 0
+        ? unit(hours, 'hour')
+        : `${unit(hours, 'hour')} ${unit(remMins, 'minute')}`;
+}
+
+function renderProvingProgress(p, jobId) {
+    // Shown even with no progress yet: the id is what correlates this proof
+    // with the prover's logs and with the runpod proxy.
+    const idRow = jobId
+        ? `<div class="hash-row" style="margin-top:8px">
+             <span class="hash-label">job</span>
+             <span class="hash-value">${esc(jobId)}</span>
+             <button class="hash-copy" onclick="copyToClipboard('${esc(jobId)}',this)">copy</button>
+           </div>`
+        : '';
+
+    // Absent for a prover that predates progress reporting, or while the
+    // executor is still running before the first segment is proven.
+    if (!p || !p.segments) return idRow;
+
+    const pct = Math.min(100, Math.round((p.segments_done / p.segments) * 100));
+    const elapsed = fmtDuration(p.elapsed_seconds);
+    const remaining = p.estimated_total_seconds != null
+        ? fmtDuration(Math.max(0, p.estimated_total_seconds - p.elapsed_seconds))
+        : null;
+
+    let meta = `${p.segments_done}/${p.segments} segments · ${elapsed} elapsed`;
+    // No ETA until a segment lands — there is nothing to extrapolate from.
+    if (remaining) meta += ` · ~${remaining} remaining`;
+
+    let h = `<div style="margin-top:10px">
+        <div style="height:6px;background:var(--bg-base);border-radius:3px;overflow:hidden">
+            <div style="height:100%;width:${pct}%;background:var(--accent);transition:width .4s ease"></div>
+        </div>
+        <div style="margin-top:6px;font-family:var(--mono);font-size:11px;color:var(--text-muted)">
+            ${esc(meta)}
+        </div>`;
+
+    // The first segment carries GPU warm-up and any PTX JIT, so it is called
+    // out rather than averaged into the rate.
+    if (p.first_segment_seconds != null && p.segments_done > 1) {
+        h += `<div style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">
+            first segment ${esc(fmtDuration(p.first_segment_seconds))} (includes warm-up)
+        </div>`;
+    }
+
+    // Whatever else the prover chose to report. A custom prover — the runpod
+    // proxy, say — knows things this UI cannot anticipate: the GPU it rented,
+    // the pod's hourly rate, queue position. Rendered generically so no subs
+    // change is needed to surface a new one.
+    const KNOWN = new Set([
+        'total_cycles', 'proving_cycles_done', 'segments', 'segments_done',
+        'elapsed_seconds', 'estimated_total_seconds', 'first_segment_seconds',
+    ]);
+    const extras = Object.entries(p).filter(([k, v]) =>
+        !KNOWN.has(k) && v != null && typeof v !== 'object');
+
+    for (const [k, v] of extras) {
+        const label = k.replace(/_/g, ' ');
+        const val = typeof v === 'number' ? v.toLocaleString() : String(v);
+        h += `<div style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">
+            ${esc(label)}: <span style="color:var(--text-secondary)">${esc(val)}</span>
+        </div>`;
+    }
+
+    return h + '</div>' + idRow;
+}
+
+async function cancelProving() {
+    if (!confirm('Cancel this proof?\n\nA queued job stops immediately. One already running finishes on the prover and its result is discarded — the GPU time is not reclaimed.')) return;
+    const { ok, data } = await api(`${spaceUrl}/proving/cancel`, { method: 'POST' });
+    if (ok) {
+        logAction(`Proving cancelled: ${data.job_id}`);
+        refreshPipeline();
+    } else {
+        logAction(`Cancel failed: ${data.error || 'unknown'}`);
+    }
+}
+
 function renderActions(r) {
     const el = $('pipelineActions');
     let h = '';
@@ -427,6 +535,7 @@ function renderActions(r) {
                         <path opacity="0.75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
                     <span style="font-size:13px">Generating proof${proofLabel}...
                         <span style="color:var(--text-muted)">(${total} pending)</span></span></div>`;
+                h += renderProvingProgress(r.proving_progress, r.proving_job_id);
             }
             if (r.estimate) {
                 h += '<div style="margin-top:10px;padding:12px;background:var(--bg-base);border:1px solid var(--border-subtle);border-radius:8px">';
@@ -444,7 +553,9 @@ function renderActions(r) {
                     <button onclick="startProving()" class="btn-primary">Prove${proofLabel ? ' ' + proofLabel.trim() : ''}</button>
                     <button onclick="rollbackLocal()" class="btn-secondary">Rollback</button></div>`;
             } else {
-                h += '<button onclick="rollbackLocal()" class="btn-sm" style="margin-top:10px">Rollback Local</button>';
+                h += `<div class="flex gap-3" style="margin-top:10px">
+                    <button onclick="cancelProving()" class="btn-secondary">Cancel Job</button>
+                    <button onclick="rollbackLocal()" class="btn-sm">Rollback Local</button></div>`;
             }
         } else {
             h += `<div class="alert alert-warning">

@@ -15,6 +15,30 @@ use serde::{Deserialize, Serialize};
 use subs_core::CompressInput;
 
 use crate::state::AppState;
+
+/// Live proving progress, forwarded verbatim from the prover.
+///
+/// The prover is the only place that knows how far along a proof is; subs just
+/// relays it so the UI can show a bar instead of a spinner. Fields are optional
+/// so a prover that predates progress reporting still deserializes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobProgress {
+    pub total_cycles: u64,
+    pub proving_cycles_done: u64,
+    pub segments: usize,
+    pub segments_done: usize,
+    pub elapsed_seconds: f64,
+    pub estimated_total_seconds: Option<f64>,
+    pub first_segment_seconds: Option<f64>,
+    /// Anything else the prover reported.
+    ///
+    /// A custom prover knows things this one cannot — which GPU it rented, what
+    /// the pod costs, where it is queued. Without this those fields would be
+    /// dropped on deserialization; flattening keeps them so the UI can display
+    /// them generically, without subs needing to know what they mean.
+    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
 use super::json_error;
 
 /// Request type for fulfill payload
@@ -288,6 +312,90 @@ pub struct PollResponse {
     pub message: Option<String>,
 }
 
+/// POST /spaces/:space/proving/cancel - Stop the in-flight proving job.
+///
+/// Clears the local job key regardless of what the prover says, so the UI stops
+/// waiting on a job it has abandoned. A queued job never runs; a running one
+/// finishes on the prover and has its receipt discarded — see the prover's
+/// cancel_job for why it cannot be interrupted mid-proof.
+pub async fn cancel_proving(
+    State(state): State<AppState>,
+    Path(space): Path<String>,
+) -> Result<Json<serde_json::Value>, Response> {
+    let space_label: spaces_protocol::slabel::SLabel = space
+        .parse()
+        .map_err(|e| json_error(StatusCode::BAD_REQUEST, format!("invalid space: {}", e)))?;
+
+    let prover_endpoint = state
+        .config
+        .prover_endpoint()
+        .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "prover_endpoint not configured"))?;
+
+    let request = state
+        .operator
+        .get_next_proving_request(&space_label)
+        .await
+        .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "no proving request in flight"))?;
+
+    let commitment_id = request.commitment_id();
+    let is_fold = matches!(&request, subs_core::ProvingRequest::Fold { .. });
+    let job_key = format!(
+        "job:{}:{}:{}",
+        space,
+        commitment_id,
+        if is_fold { "fold" } else { "step" }
+    );
+
+    let job_id = state
+        .config
+        .get(&job_key)
+        .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "no job in flight for this commitment"))?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+
+    let url = format!(
+        "{}/jobs/{}/cancel",
+        prover_endpoint.trim_end_matches('/'),
+        job_id
+    );
+    let mut req = client.post(&url);
+    if let Some(t) = state.config.prover_auth_token().ok().flatten() {
+        req = req.bearer_auth(t);
+    }
+
+    let prover_said = match req.send().await {
+        Ok(r) => {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            if status.is_success() {
+                serde_json::from_str::<serde_json::Value>(&body).unwrap_or(serde_json::json!({}))
+            } else {
+                // A job the prover has already lost or finished is still worth
+                // clearing locally, so this is reported rather than fatal.
+                serde_json::json!({ "prover_status": status.as_u16(), "prover_body": body })
+            }
+        }
+        Err(e) => serde_json::json!({ "prover_error": e.to_string() }),
+    };
+
+    // Drop the key either way: whatever the prover does with the work, subs is
+    // no longer waiting on it, and leaving the key would keep the UI showing a
+    // job that will never be collected.
+    let _ = state.config.delete(&job_key);
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "job_id": job_id,
+        "prover": prover_said,
+    })))
+}
+
 /// POST /spaces/:space/proving/poll - Poll prover for job completion and save receipt
 pub async fn poll_prover(
     State(state): State<AppState>,
@@ -371,6 +479,8 @@ pub async fn poll_prover(
     struct JobStatusResponse {
         status: String,
         error: Option<String>,
+        #[serde(default)]
+        progress: Option<JobProgress>,
     }
 
     let job_status: JobStatusResponse = response
@@ -412,6 +522,11 @@ pub async fn poll_prover(
 
             // Clean up job key
             let _ = state.config.delete(&job_key);
+
+            // The stored estimate described the proof that just finished; the
+            // next one is a different shape. Cleared so it isn't read as a
+            // forecast for work it says nothing about.
+            let _ = state.operator.clear_estimate(&space_label, commitment_id).await;
 
             Ok(Json(PollResponse {
                 success: true,
@@ -499,4 +614,64 @@ pub async fn get_estimate(
         .map_err(|e| json_error(StatusCode::BAD_GATEWAY, format!("invalid prover response: {}", e)))?;
 
     Ok((StatusCode::OK, Json(estimate)).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::JobProgress;
+
+    /// A custom prover's extra fields must survive deserialization.
+    ///
+    /// Without `#[serde(flatten)]` these are dropped silently — the struct
+    /// still parses, the UI just shows nothing — so this is the kind of
+    /// regression that would not surface until someone asked why their proxy's
+    /// fields never appeared.
+    #[test]
+    fn unknown_fields_are_preserved() {
+        let json = r#"{
+            "total_cycles": 4081240,
+            "proving_cycles_done": 3145728,
+            "segments": 5,
+            "segments_done": 3,
+            "elapsed_seconds": 333.4,
+            "estimated_total_seconds": 572.1,
+            "first_segment_seconds": 94.0,
+            "gpu": "NVIDIA A100 80GB PCIe",
+            "hourly_rate": 1.19
+        }"#;
+
+        let p: JobProgress = serde_json::from_str(json).expect("deserialize");
+
+        assert_eq!(p.segments_done, 3);
+        assert_eq!(p.segments, 5);
+        assert_eq!(
+            p.extra.get("gpu").and_then(|v| v.as_str()),
+            Some("NVIDIA A100 80GB PCIe")
+        );
+        assert_eq!(p.extra.get("hourly_rate").and_then(|v| v.as_f64()), Some(1.19));
+        // Known fields must not leak into extra, or the UI renders them twice.
+        assert!(!p.extra.contains_key("segments"));
+        assert!(!p.extra.contains_key("elapsed_seconds"));
+    }
+
+    /// A prover that reports nothing extra round-trips with an empty map, and
+    /// re-serializes without an `extra` key.
+    #[test]
+    fn plain_progress_round_trips() {
+        let json = r#"{
+            "total_cycles": 100,
+            "proving_cycles_done": 50,
+            "segments": 2,
+            "segments_done": 1,
+            "elapsed_seconds": 1.5,
+            "estimated_total_seconds": null,
+            "first_segment_seconds": null
+        }"#;
+
+        let p: JobProgress = serde_json::from_str(json).expect("deserialize");
+        assert!(p.extra.is_empty());
+
+        let out = serde_json::to_string(&p).expect("serialize");
+        assert!(!out.contains("extra"), "flattened map must not emit a key: {out}");
+    }
 }

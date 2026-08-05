@@ -192,6 +192,34 @@ pub async fn get_commit_status(
     Ok(Json(response))
 }
 
+/// Read live progress for one job, best-effort.
+async fn fetch_job_progress(
+    state: &AppState,
+    prover_endpoint: &str,
+    job_id: &str,
+) -> Option<super::proving::JobProgress> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        #[serde(default)]
+        progress: Option<super::proving::JobProgress>,
+    }
+
+    let client = reqwest::Client::builder()
+        // Short: this runs inside a UI poll, so a slow prover should degrade
+        // to "no progress bar", not hold up the whole pipeline response.
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .ok()?;
+
+    let url = format!("{}/jobs/{}", prover_endpoint.trim_end_matches('/'), job_id);
+    let mut req = client.get(&url);
+    if let Some(t) = state.config.prover_auth_token().ok().flatten() {
+        req = req.bearer_auth(t);
+    }
+
+    req.send().await.ok()?.json::<Resp>().await.ok()?.progress
+}
+
 /// Maximum handles to publish per request to avoid oversized relay messages.
 /// Certificates per publish batch. All of them go into a single message, and
 /// the relay rejects anything over its 512 KB max_message_size outright, so
@@ -343,6 +371,15 @@ pub struct PipelineResponse {
     /// How many proofs this commitment needs in total: the first commitment
     /// after genesis needs only a step, later ones need step + fold.
     pub proof_total: Option<usize>,
+    /// Prover-side id of the in-flight job, so it can be correlated with the
+    /// prover's own logs and with the runpod proxy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proving_job_id: Option<String>,
+    /// Live progress of the in-flight proof, fetched from the prover.
+    /// Best-effort: absent if the prover is unreachable or predates progress
+    /// reporting, which must not fail the pipeline view.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proving_progress: Option<super::proving::JobProgress>,
 }
 
 pub async fn get_pipeline_status(
@@ -376,6 +413,7 @@ pub async fn get_pipeline_status(
     // is a single step proof and later ones are step + fold.
     let mut proof_index = None;
     let mut proof_total = None;
+    let mut active_job_id: Option<String> = None;
 
     let proving_job_active = if let Some(idx) = status.commitment_idx {
         if let Ok(Some(req)) = state.operator.get_next_proving_request(&space_label).await {
@@ -387,12 +425,22 @@ pub async fn get_pipeline_status(
             proof_index = Some(if is_fold { 2 } else { 1 });
 
             let job_key = format!("job:{}:{}:{}", space, cid, kind);
-            state.config.get(&job_key).unwrap_or(None).is_some()
+            active_job_id = state.config.get(&job_key).unwrap_or(None);
+            active_job_id.is_some()
         } else {
             false
         }
     } else {
         false
+    };
+
+    // Ask the prover how far along it is. Only the prover knows, and the value
+    // is stale the moment it is cached, so it is fetched per request rather
+    // than stored. Failures are swallowed: a missing progress bar is a much
+    // better outcome than a broken pipeline view.
+    let proving_progress = match (active_job_id.as_deref(), state.config.prover_endpoint().ok().flatten()) {
+        (Some(job_id), Some(endpoint)) => fetch_job_progress(&state, &endpoint, job_id).await,
+        _ => None,
     };
 
     Ok(Json(PipelineResponse {
@@ -401,5 +449,7 @@ pub async fn get_pipeline_status(
         proving_job_active,
         proof_index,
         proof_total,
+        proving_job_id: active_job_id,
+        proving_progress,
     }))
 }

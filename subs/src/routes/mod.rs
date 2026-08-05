@@ -60,6 +60,7 @@ pub fn router() -> Router<AppState> {
         .route("/spaces/:space/proving/fulfill", post(proving::fulfill))
         .route("/spaces/:space/proving/push", post(proving::push_to_prover))
         .route("/spaces/:space/proving/poll", post(proving::poll_prover))
+        .route("/spaces/:space/proving/cancel", post(proving::cancel_proving))
         .route("/spaces/:space/proving/estimate", get(proving::get_estimate))
         .route("/spaces/:space/compress", get(proving::get_compress_input))
         .route("/spaces/:space/snark", post(proving::save_snark))
