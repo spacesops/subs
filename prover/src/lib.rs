@@ -132,6 +132,11 @@ impl Prover {
     /// explicitly changes nothing about the receipt; it only makes the session
     /// visible so cycle counts and segment progress can be reported while the
     /// job is still running, instead of arriving with the receipt.
+    ///
+    /// Note this proves in-process via `get_prover_server`, so unlike
+    /// `default_prover` it ignores RISC0_PROVER and BONSAI_API_*. That is the
+    /// intent — this binary *is* the prover a client dials — but it means
+    /// setting those env vars will not redirect proving elsewhere.
     fn prove_session_with_progress(
         &self,
         idx: usize,
@@ -213,11 +218,11 @@ impl Prover {
             .build()
             .map_err(|e| anyhow!("[#{}] env build: {}", idx, e))?;
 
-        let prove_info = default_prover()
-            .prove_with_opts(env, FOLD_ELF, &ProverOpts::succinct())
-            .map_err(|e| anyhow!("[#{}] fold prove failed: {}", idx, e))?;
+        // Same instrumented path as the step half. Assumption resolution lives
+        // inside prove_session, which is all prove_with_opts would have added.
+        let receipt = self.prove_session_with_progress(idx, env, FOLD_ELF, sink)?;
 
-        let receipt_bytes = borsh::to_vec(&prove_info.receipt)
+        let receipt_bytes = borsh::to_vec(&receipt)
             .map_err(|e| anyhow!("[#{}] serialize receipt: {}", idx, e))?;
 
         Ok(receipt_bytes)
