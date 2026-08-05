@@ -207,10 +207,13 @@ async fn proving_loop(state: AppState) {
                     }
                 }
             } else {
-                // Only fetch and store the estimate; proving is user-initiated via the UI
-                if let Err(e) = fetch_and_store_estimate(&state, &prover_endpoint, prover_auth_token.as_deref(), space, commitment_id, &request).await {
-                    tracing::debug!("[{}] Could not fetch estimate: {}", space, e);
-                }
+                // Estimate fetching is disabled along with its UI. It ran on
+                // every pass — unguarded — and /estimate executes the guest to
+                // count cycles, so an unproven commitment re-executed it every
+                // 10s indefinitely, for a figure nothing renders and that read
+                // ~43% low anyway (calibration measures composite(), real jobs
+                // run succinct()). Re-enable together with the display.
+                let _ = &request;
             }
         }
 
@@ -220,6 +223,11 @@ async fn proving_loop(state: AppState) {
 }
 
 /// Fetch a proving estimate from the prover and store it on the commitment.
+///
+/// Currently unused: see the call site in the proving loop for why estimates
+/// are off. Kept so re-enabling is a one-line change once calibration measures
+/// the phase real jobs actually run.
+#[allow(dead_code)]
 async fn fetch_and_store_estimate(
     state: &AppState,
     prover_endpoint: &str,
