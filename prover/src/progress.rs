@@ -1,10 +1,14 @@
 //! Live progress for an in-flight proving job.
 //!
-//! The prover is the only place that knows how long a job will take: the
-//! session gives the segment count before proving starts, and risc0 fires a
-//! hook around each segment as it is proven. Together those turn "processing"
-//! into an ETA measured on this GPU, for this job — rather than extrapolated
-//! from a synthetic calibration run on some other pod.
+//! The prover decides entirely what a client displays: the heading, whether
+//! there is a bar and how full it is, which figures appear and in what order.
+//! subs renders what it is given and computes nothing.
+//!
+//! That split matters because the phases are this prover's, not a universal
+//! truth. A proxy that rents a pod has a boot phase; a prover that has profiled
+//! lift/join can report a fraction where this one cannot. Encoding "there are
+//! two phases, the second is unknowable" in the UI would make those
+//! unexpressible.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -13,50 +17,104 @@ use std::time::Instant;
 use risc0_zkvm::{Segment, SessionEvents};
 use serde::Serialize;
 
+/// How a client should draw the progress bar.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Bar {
+    /// Draw it filled to `fraction`.
+    Determinate,
+    /// Work is happening; its extent is unknown.
+    Indeterminate,
+    /// Draw no bar at all — for a status that is not progress, such as
+    /// "queued". Distinct from Indeterminate, which still asserts that
+    /// something is underway.
+    None,
+}
+
+/// One figure to display, already formatted.
+///
+/// The prover formats rather than sending raw numbers: it is the only side that
+/// knows whether a value is cycles, seconds, or dollars, and a client that
+/// re-derives "1.6M" from 1567156 is guessing at units it was never told.
+#[derive(Debug, Clone, Serialize)]
+pub struct Stat {
+    pub label: String,
+    pub value: String,
+    /// Emphasised. At most one is worth marking — normally whatever the
+    /// operator is actually waiting on.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub accent: bool,
+}
+
+impl Stat {
+    fn new(label: &str, value: impl Into<String>) -> Self {
+        Self { label: label.into(), value: value.into(), accent: false }
+    }
+
+    fn accented(label: &str, value: impl Into<String>) -> Self {
+        Self { label: label.into(), value: value.into(), accent: true }
+    }
+}
+
 /// A snapshot of a job's progress, safe to serialize into a status response.
+///
+/// Every field is optional. A prover with nothing useful to say omits the whole
+/// structure; one that only wants to report "booting" sends a `label` and
+/// nothing else.
 #[derive(Debug, Clone, Serialize)]
 pub struct JobProgress {
-    /// User cycles executed by the guest.
-    pub total_cycles: u64,
-    /// Padded proving cycles across the segments proven so far. Equals the
-    /// job's true total once `segments_done == segments`.
-    pub proving_cycles_done: u64,
-    /// Segments this job will prove. Known before proving starts.
-    pub segments: usize,
-    /// Segments proven so far.
-    pub segments_done: usize,
-    /// Wall-clock since proving began.
-    pub elapsed_seconds: f64,
-    /// Projected total wall-clock. `None` until a segment completes — there is
-    /// nothing to extrapolate from before that.
-    pub estimated_total_seconds: Option<f64>,
-    /// Which phase the job is in, 1-based.
-    ///
-    /// 1. Proving segments. Determinate: `segments_done` of `segments`.
-    /// 2. Lift/join/resolve, turning the composite segment receipts into the
-    ///    succinct receipt. risc0 exposes no `SessionEvents` hook for this, so
-    ///    nothing can be observed while it runs — it is genuinely
-    ///    indeterminate, not merely unmeasured.
-    ///
-    /// Reporting it matters because phase 2 is not a tail: on a measured
-    /// single-segment step proof, segments finished at 10.7s of 38.8s, so 72%
-    /// of the wall-clock happened in phase 2 with the bar already full.
-    pub phase: u8,
-    /// Total phases, so the UI need not hardcode it.
-    pub phase_total: u8,
-    /// Fraction of phase 1 complete (0.0–1.0), interpolated within the segment
-    /// currently being proven so the bar advances between completions.
-    ///
-    /// `None` while the first segment is proving — there is no measured segment
-    /// duration to interpolate against yet — and throughout phase 2.
-    pub phase_one_fraction: Option<f64>,
-    /// Wall-clock of the first segment.
-    ///
-    /// Worth reporting separately: only sm_80 gets native SASS in the shipped
-    /// image, so every other GPU JIT-compiles PTX on its first kernel launch
-    /// and pays for it here. Comparing this against the mean is what tells an
-    /// operator whether baking in their card's SASS is worth the build time.
-    pub first_segment_seconds: Option<f64>,
+    /// What is happening now, in the prover's own words.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Position in a sequence of phases, for an "N of M" indicator. Phases are
+    /// whatever the prover says they are.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase_total: Option<u8>,
+    /// 0.0–1.0. Only meaningful when `bar` is Determinate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fraction: Option<f64>,
+    /// Omitted means "Determinate if `fraction` is set, else Indeterminate", so
+    /// the ordinary cases need not send it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bar: Option<Bar>,
+    /// Figures to display, in the order they should appear.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stats: Vec<Stat>,
+    /// Lines to surface — pod boot output, queue notices. Replaced wholesale on
+    /// every poll, so the prover decides how many to keep and how to format
+    /// them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub log: Vec<String>,
+}
+
+/// Compact duration: "48s", "1m 32s", "2h 5m".
+///
+/// Spelled-out forms wrap inside a stat tile and bury the number.
+fn fmt_duration(seconds: f64) -> String {
+    let total = seconds.max(0.0).round() as u64;
+    if total < 60 {
+        return format!("{}s", total);
+    }
+    let mins = total / 60;
+    if mins < 60 {
+        let secs = total % 60;
+        return if secs == 0 { format!("{}m", mins) } else { format!("{}m {}s", mins, secs) };
+    }
+    let hours = mins / 60;
+    let rem = mins % 60;
+    if rem == 0 { format!("{}h", hours) } else { format!("{}h {}m", hours, rem) }
+}
+
+/// Cycle counts run to millions, where exact digits are noise.
+fn fmt_cycles(n: u64) -> String {
+    match n {
+        n if n >= 1_000_000_000 => format!("{:.1}B", n as f64 / 1e9),
+        n if n >= 1_000_000 => format!("{:.1}M", n as f64 / 1e6),
+        n if n >= 1_000 => format!("{:.1}K", n as f64 / 1e3),
+        n => n.to_string(),
+    }
 }
 
 /// Shared progress counters, written by the proving hook and read by the
@@ -193,7 +251,7 @@ impl ProgressSink {
         // scale against, so it only starts once one has been measured — the
         // very first segment has no basis and reports None, which the UI shows
         // as an indeterminate bar rather than a fabricated position.
-        let phase_one_fraction = if in_phase_two || segments == 0 || done == 0 || last <= 0.0 {
+        let fraction = if in_phase_two || segments == 0 || done == 0 || last <= 0.0 {
             None
         } else {
             let mean_segment = last / done as f64;
@@ -201,17 +259,54 @@ impl ProgressSink {
             Some(((done as f64 + within) / segments as f64).min(1.0))
         };
 
+        // Nothing has been reported yet: the executor is still running and even
+        // the segment count is unknown. Saying so beats a bar at zero.
+        if segments == 0 {
+            return JobProgress {
+                label: Some("Executing".into()),
+                phase: None,
+                phase_total: None,
+                fraction: None,
+                bar: None,
+                stats: vec![Stat::new("elapsed", fmt_duration(elapsed))],
+                log: Vec::new(),
+            };
+        }
+
+        let mut stats = Vec::new();
+        if let Some(total) = estimated_total_seconds {
+            stats.push(Stat::accented("remaining", format!("~{}", fmt_duration(total - elapsed))));
+        }
+        stats.push(Stat::new("elapsed", fmt_duration(elapsed)));
+        if !in_phase_two {
+            stats.push(Stat::new("segments", format!("{}/{}", done, segments)));
+        }
+        let total_cycles = self.total_cycles.load(Ordering::Relaxed);
+        if total_cycles > 0 {
+            stats.push(Stat::new("cycles", fmt_cycles(total_cycles)));
+        }
+        // Only sm_80 gets native SASS in the shipped image, so every other GPU
+        // JIT-compiles PTX on its first kernel launch and pays for it here.
+        // Comparing this against the mean tells an operator whether baking in
+        // their card's SASS is worth the build time.
+        if first_ms > 0 {
+            stats.push(Stat::new("first segment", fmt_duration(first_ms as f64 / 1000.0)));
+        }
+
         JobProgress {
-            total_cycles: self.total_cycles.load(Ordering::Relaxed),
-            proving_cycles_done: self.proving_cycles_done.load(Ordering::Relaxed),
-            segments,
-            segments_done: done,
-            elapsed_seconds: elapsed,
-            estimated_total_seconds,
-            phase: if in_phase_two { 2 } else { 1 },
-            phase_total: 2,
-            phase_one_fraction,
-            first_segment_seconds: (first_ms > 0).then_some(first_ms as f64 / 1000.0),
+            label: Some(
+                if in_phase_two { "Producing succinct receipt" } else { "Proving segments" }.into(),
+            ),
+            phase: Some(if in_phase_two { 2 } else { 1 }),
+            phase_total: Some(2),
+            fraction,
+            // Left to the default rule: determinate when a fraction is present.
+            // Phase 2 has none — lift/join/resolve fire no hook — so it draws
+            // indeterminate, which is the honest shape for work of unknown
+            // extent rather than a full bar sitting still.
+            bar: None,
+            stats,
+            log: Vec::new(),
         }
     }
 }

@@ -16,42 +16,55 @@ use subs_core::CompressInput;
 
 use crate::state::AppState;
 
-fn one() -> u8 {
-    1
+/// One figure the prover wants displayed, already formatted by it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Stat {
+    pub label: String,
+    pub value: String,
+    #[serde(default)]
+    pub accent: bool,
 }
 
 /// Live proving progress, forwarded verbatim from the prover.
 ///
-/// The prover is the only place that knows how far along a proof is; subs just
-/// relays it so the UI can show a bar instead of a spinner. Fields are optional
-/// so a prover that predates progress reporting still deserializes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The prover decides what is displayed — heading, bar, figures and their
+/// order. subs relays; it computes and formats nothing, because only the prover
+/// knows what its phases are or what a value means.
+///
+/// **Every field is optional**, deliberately. A prover that is booting a GPU
+/// has no segment count and no cycles, and requiring them would leave it
+/// choosing between sending zeros it would have to invent and saying nothing at
+/// all. An unparseable progress body is dropped entirely, so a required field
+/// is not a small cost.
+/// Absent fields are skipped on the way out too, not re-emitted as nulls:
+/// subs forwards this into the pipeline response, and a prover reporting only
+/// "booting" should not turn into a wall of nulls for whoever reads that API.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct JobProgress {
-    pub total_cycles: u64,
-    pub proving_cycles_done: u64,
-    pub segments: usize,
-    pub segments_done: usize,
-    pub elapsed_seconds: f64,
-    pub estimated_total_seconds: Option<f64>,
-    pub first_segment_seconds: Option<f64>,
-    /// Which phase the prover is in, and how many there are. Defaulted rather
-    /// than optional so a prover that predates phase reporting still
-    /// deserializes and simply reads as "phase 1 of 1" — one determinate bar,
-    /// which is exactly how it used to behave.
-    #[serde(default = "one")]
-    pub phase: u8,
-    #[serde(default = "one")]
-    pub phase_total: u8,
-    #[serde(default)]
-    pub phase_one_fraction: Option<f64>,
-    /// Anything else the prover reported.
-    ///
-    /// A custom prover knows things this one cannot — which GPU it rented, what
-    /// the pod costs, where it is queued. Without this those fields would be
-    /// dropped on deserialization; flattening keeps them so the UI can display
-    /// them generically, without subs needing to know what they mean.
-    #[serde(flatten, default, skip_serializing_if = "serde_json::Map::is_empty")]
-    pub extra: serde_json::Map<String, serde_json::Value>,
+    /// What is happening now, in the prover's words.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Position in a prover-defined sequence, for an "N of M" indicator.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase_total: Option<u8>,
+    /// 0.0–1.0, meaningful when the bar is determinate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fraction: Option<f64>,
+    /// "determinate" | "indeterminate" | "none". Absent means determinate when
+    /// `fraction` is set, indeterminate otherwise — so ordinary cases omit it.
+    /// "none" draws no bar, for a status that is not progress.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bar: Option<String>,
+    /// Figures to display, in the order given.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stats: Vec<Stat>,
+    /// Lines to surface — pod boot output, queue notices. Replaced wholesale
+    /// each poll; the prover owns retention and formatting.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub log: Vec<String>,
 }
 use super::json_error;
 
@@ -637,58 +650,64 @@ pub async fn get_estimate(
 mod tests {
     use super::JobProgress;
 
-    /// A custom prover's extra fields must survive deserialization.
+    /// Stats keep the prover's order.
     ///
-    /// Without `#[serde(flatten)]` these are dropped silently — the struct
-    /// still parses, the UI just shows nothing — so this is the kind of
-    /// regression that would not surface until someone asked why their proxy's
-    /// fields never appeared.
+    /// They used to be a flattened `serde_json::Map`, which is a BTreeMap
+    /// without the `preserve_order` feature — so a prover's fields were
+    /// silently re-sorted alphabetically before display.
     #[test]
-    fn unknown_fields_are_preserved() {
+    fn stats_keep_the_provers_order() {
         let json = r#"{
-            "total_cycles": 4081240,
-            "proving_cycles_done": 3145728,
-            "segments": 5,
-            "segments_done": 3,
-            "elapsed_seconds": 333.4,
-            "estimated_total_seconds": 572.1,
-            "first_segment_seconds": 94.0,
-            "gpu": "NVIDIA A100 80GB PCIe",
-            "hourly_rate": 1.19
+            "label": "Proving segments",
+            "phase": 1, "phase_total": 2,
+            "fraction": 0.62,
+            "stats": [
+                {"label": "remaining", "value": "~4m 12s", "accent": true},
+                {"label": "gpu", "value": "NVIDIA A100 80GB PCIe"},
+                {"label": "hourly rate", "value": "$1.19"}
+            ]
         }"#;
 
         let p: JobProgress = serde_json::from_str(json).expect("deserialize");
 
-        assert_eq!(p.segments_done, 3);
-        assert_eq!(p.segments, 5);
-        assert_eq!(
-            p.extra.get("gpu").and_then(|v| v.as_str()),
-            Some("NVIDIA A100 80GB PCIe")
-        );
-        assert_eq!(p.extra.get("hourly_rate").and_then(|v| v.as_f64()), Some(1.19));
-        // Known fields must not leak into extra, or the UI renders them twice.
-        assert!(!p.extra.contains_key("segments"));
-        assert!(!p.extra.contains_key("elapsed_seconds"));
+        let order: Vec<&str> = p.stats.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(order, ["remaining", "gpu", "hourly rate"]);
+        assert!(p.stats[0].accent);
+        assert!(!p.stats[1].accent, "accent defaults to false");
+        assert_eq!(p.fraction, Some(0.62));
     }
 
-    /// A prover that reports nothing extra round-trips with an empty map, and
-    /// re-serializes without an `extra` key.
+    /// A prover with no numbers to report must still deserialize.
+    ///
+    /// This is the case that forced the redesign: a proxy booting a GPU has no
+    /// segments and no cycles. When those fields were required it had to invent
+    /// zeros, because an unparseable body is dropped whole and shows nothing.
     #[test]
-    fn plain_progress_round_trips() {
+    fn a_status_without_any_numbers_is_accepted() {
         let json = r#"{
-            "total_cycles": 100,
-            "proving_cycles_done": 50,
-            "segments": 2,
-            "segments_done": 1,
-            "elapsed_seconds": 1.5,
-            "estimated_total_seconds": null,
-            "first_segment_seconds": null
+            "label": "Booting GPU server",
+            "bar": "indeterminate",
+            "log": ["10:32:01 pulling image", "10:32:44 cuda ready"]
         }"#;
 
         let p: JobProgress = serde_json::from_str(json).expect("deserialize");
-        assert!(p.extra.is_empty());
 
+        assert_eq!(p.label.as_deref(), Some("Booting GPU server"));
+        assert_eq!(p.bar.as_deref(), Some("indeterminate"));
+        assert_eq!(p.log.len(), 2);
+        assert!(p.stats.is_empty());
+        assert_eq!(p.fraction, None);
+    }
+
+    /// An empty body is valid and says nothing, rather than failing to parse.
+    #[test]
+    fn an_empty_body_deserializes() {
+        let p: JobProgress = serde_json::from_str("{}").expect("deserialize");
+        assert!(p.label.is_none() && p.stats.is_empty() && p.log.is_empty());
+
+        // Absent fields must not be re-emitted as nulls: subs forwards this
+        // verbatim, and a wall of nulls is noise for anyone reading the API.
         let out = serde_json::to_string(&p).expect("serialize");
-        assert!(!out.contains("extra"), "flattened map must not emit a key: {out}");
+        assert!(!out.contains("null"), "empty progress should stay empty: {out}");
     }
 }
