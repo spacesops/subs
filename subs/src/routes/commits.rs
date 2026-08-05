@@ -220,12 +220,18 @@ async fn fetch_job_progress(
     req.send().await.ok()?.json::<Resp>().await.ok()?.progress
 }
 
-/// Maximum handles to publish per request to avoid oversized relay messages.
-/// Certificates per publish batch. All of them go into a single message, and
-/// the relay rejects anything over its 512 KB max_message_size outright, so
-/// this stays well under the point where proof-carrying certs could add up
-/// to a flat 413.
-pub(crate) const PUBLISH_BATCH_SIZE: usize = 50;
+/// Sanity cap on certificates per publish batch.
+///
+/// Not the target: publish_certs sizes each batch from the last message's
+/// measured bytes, because a relay rejects anything over its 512 KB
+/// max_message_size outright and the real constraint is bytes rather than
+/// count. This only bounds the pathological case where a message is somehow
+/// tiny — it must stay well *above* the byte-derived size, or it silently
+/// caps growth and the measurement does nothing.
+///
+/// Measured against a 20k-handle backlog: batches converge to ~500
+/// certificates for ~445 KB, so bytes bind well below this.
+pub(crate) const PUBLISH_BATCH_SIZE: usize = 1000;
 
 #[derive(Serialize)]
 pub struct PublishResponse {

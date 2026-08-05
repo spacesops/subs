@@ -108,6 +108,19 @@ async fn registry_loop(state: AppState) {
                 .await
             {
                 Ok((0, 0)) => {}
+                // Nothing published but work remains: the batch was built and
+                // measured, then declined for exceeding the relay's message
+                // limit. submit_certs has already logged the size and recorded
+                // it, so the next pass rebuilds a smaller one — saying
+                // "Published 0" here would read as a stall rather than a resize.
+                Ok((0, remaining)) => {
+                    sent_any = true;
+                    tracing::debug!(
+                        "[{}] Batch declined as oversized, {} cert(s) still pending",
+                        space,
+                        remaining
+                    );
+                }
                 Ok((published, remaining)) => {
                     sent_any = true;
                     tracing::info!(
