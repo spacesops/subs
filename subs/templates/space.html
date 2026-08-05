@@ -425,57 +425,13 @@ function renderStepper(r) {
     $('pipelineStepper').innerHTML = h;
 }
 
-// Cycle counts run to millions, where exact digits are noise.
-function fmtCycles(n) {
-    if (n == null) return null;
-    if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
-    if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
-    if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
-    return `${n}`;
-}
-
-// Compact form for stat tiles, where "1 minute 32 seconds" wraps to two lines
-// and buries the number. Prose elsewhere still uses fmtDuration.
-function fmtDurationShort(sec) {
-    if (sec == null) return null;
-    const total = Math.max(0, Math.round(sec));
-    if (total < 60) return `${total}s`;
-    const mins = Math.floor(total / 60);
-    if (mins < 60) {
-        const secs = total % 60;
-        return secs === 0 ? `${mins}m` : `${mins}m ${secs}s`;
-    }
-    const hours = Math.floor(mins / 60);
-    const remMins = mins % 60;
-    return remMins === 0 ? `${hours}h` : `${hours}h ${remMins}m`;
-}
-
-function fmtDuration(sec) {
-    if (sec == null) return null;
-    const total = Math.max(0, Math.round(sec));
-    const unit = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
-
-    if (total < 60) return unit(total, 'second');
-
-    const mins = Math.floor(total / 60);
-    const secs = total % 60;
-    if (mins < 60) {
-        // Seconds stop mattering once it is a long wait.
-        return mins >= 10 || secs === 0
-            ? unit(mins, 'minute')
-            : `${unit(mins, 'minute')} ${unit(secs, 'second')}`;
-    }
-
-    const hours = Math.floor(mins / 60);
-    const remMins = mins % 60;
-    return remMins === 0
-        ? unit(hours, 'hour')
-        : `${unit(hours, 'hour')} ${unit(remMins, 'minute')}`;
-}
-
+// Draws what the prover reported. Computes and formats nothing: the phases,
+// the figures and their order are the prover's to decide, so a proxy that boots
+// a pod or a prover that can measure recursion is not forced into this one's
+// shape.
 function renderProvingProgress(p, jobId) {
-    // Shown even with no progress yet: the id is what correlates this proof
-    // with the prover's logs and with the runpod proxy.
+    // Shown even with no progress: the id is what correlates this proof with
+    // the prover's logs and with a proxy's own records.
     const idRow = jobId
         ? `<div class="hash-row" style="margin-top:8px">
              <span class="hash-label">job</span>
@@ -484,92 +440,64 @@ function renderProvingProgress(p, jobId) {
            </div>`
         : '';
 
-    // Absent for a prover that predates progress reporting, or while the
-    // executor is still running before the first segment is proven.
-    if (!p || !p.segments) return idRow;
+    if (!p) return idRow;
 
-    // `title` carries any explanation, so the tiles stay uniform instead of
-    // growing a line of prose underneath.
-    const stat = (label, value, opts = {}) => `
-        <div class="prove-stat${opts.accent ? ' prove-stat-accent' : ''}"${opts.title ? ` title="${esc(opts.title)}"` : ''}>
-            <span class="prove-stat-label">${esc(label)}</span>
-            <span class="prove-stat-value">${esc(value)}</span>
-        </div>`;
+    const stats = Array.isArray(p.stats) ? p.stats : [];
+    const log = Array.isArray(p.log) ? p.log : [];
+    // A prover that sent a body with nothing in it gets nothing drawn, rather
+    // than an empty panel.
+    if (!p.label && !stats.length && !log.length && p.fraction == null) return idRow;
 
-    const elapsed = fmtDurationShort(p.elapsed_seconds);
-    const phaseTotal = p.phase_total || 1;
-    // Phase 2 is lift/join/resolve. risc0 fires no hook during it, so there is
-    // nothing to measure and nothing to extrapolate — it gets a moving bar
-    // with no percentage rather than a full one that sits there. On a measured
-    // single-segment proof this phase was 28.1s of 38.8s, so a bar pinned at
-    // 100% for its duration was the most misleading thing on the page.
-    const inPhaseTwo = phaseTotal > 1 && p.phase >= 2;
-    // An indeterminate bar is also right for the first segment: nothing has
-    // been timed yet, so there is no honest position to draw.
-    const indeterminate = inPhaseTwo || p.phase_one_fraction == null;
-    // Just the counter — the phase's description is the panel heading.
-    const phaseLabel = phaseTotal > 1 ? `Phase ${p.phase} of ${phaseTotal}` : null;
+    // Absent means determinate when there is a fraction to draw, indeterminate
+    // otherwise. "none" is the explicit opt-out, for a status that is not
+    // progress at all — without it, "no bar" and "extent unknown" would be
+    // indistinguishable.
+    const mode = p.bar || (p.fraction != null ? 'determinate' : 'indeterminate');
+    const pct = Math.max(0, Math.min(100, Math.round((p.fraction || 0) * 100)));
+    const track = mode === 'none' ? '' : `<div class="prove-track">${
+        mode === 'determinate'
+            ? `<div class="prove-fill" style="width:${pct}%"></div>`
+            : `<div class="prove-fill-indeterminate"></div>`
+    }</div>`;
 
-    // No ETA until a segment lands — there is nothing to extrapolate from.
-    // Absent for all of phase 2, by design. Its absence is not annotated: it is
-    // the normal case here, and saying so reads as a fault.
-    const remaining = p.estimated_total_seconds != null
-        ? fmtDurationShort(Math.max(0, p.estimated_total_seconds - p.elapsed_seconds))
+    const counter = (p.phase && p.phase_total && p.phase_total > 1)
+        ? `Phase ${p.phase} of ${p.phase_total}`
         : null;
 
-    // Driven by the prover's interpolated fraction, which advances within the
-    // segment being proven. A bar keyed on segments_done alone would sit still
-    // for the minute-plus each segment takes, then jump.
-    const bar = indeterminate
-        ? `<div class="prove-fill-indeterminate"></div>`
-        : `<div class="prove-fill" style="width:${Math.min(100, Math.round(p.phase_one_fraction * 100))}%"></div>`;
+    let h = '<div class="prove-panel">';
+    if (p.label || counter) {
+        h += `<div class="prove-head">
+            <span class="prove-phase">${esc(p.label || '')}</span>
+            ${counter ? `<span class="prove-phase-num">${esc(counter)}</span>` : ''}
+        </div>`;
+    }
+    h += track;
 
-    let h = `<div class="prove-panel">
-        <div class="prove-head">
-            <span class="prove-phase">${esc(inPhaseTwo ? 'Producing succinct receipt' : 'Proving segments')}</span>
-            ${phaseLabel ? `<span class="prove-phase-num">${esc(phaseLabel)}</span>` : ''}
-        </div>
-        <div class="prove-track">${bar}</div>
-        <div class="prove-stats">`;
-
-    // Ordered by what someone watching a proof actually wants: how much longer,
-    // then how long so far, then the work being done.
-    if (remaining) h += stat('remaining', `~${remaining}`, { accent: true });
-    h += stat('elapsed', elapsed);
-    if (!inPhaseTwo) h += stat('segments', `${p.segments_done}/${p.segments}`);
-    // Collected by the prover and forwarded all along, but previously listed in
-    // KNOWN (so skipped by the extras block) without being rendered anywhere —
-    // so cycle counts never reached the page at all.
-    if (p.total_cycles) h += stat('cycles', fmtCycles(p.total_cycles));
-    // Gated on `segments_done > 1` before, which a single-segment job never
-    // reaches — so on the proofs this actually produces it never rendered. It
-    // is the only number separating warm-up (PTX JIT) from steady-state rate.
-    if (p.first_segment_seconds != null && p.segments_done >= 1) {
-        h += stat('first segment', fmtDurationShort(p.first_segment_seconds), {
-            title: 'The first segment includes GPU warm-up and any PTX JIT, so it runs slower than the ones after it.',
-        });
+    // Rendered in the order given, formatted by the prover. Only it knows
+    // whether a value is cycles, seconds or dollars.
+    if (stats.length) {
+        h += '<div class="prove-stats">';
+        for (const s of stats) {
+            if (!s || s.value == null) continue;
+            const label = String(s.label ?? '');
+            h += `<div class="prove-stat${s.accent ? ' prove-stat-accent' : ''}" title="${esc(label)}">
+                <span class="prove-stat-label">${esc(label)}</span>
+                <span class="prove-stat-value">${esc(s.value)}</span>
+            </div>`;
+        }
+        h += '</div>';
     }
 
-    // Whatever else the prover chose to report. A custom prover — the runpod
-    // proxy, say — knows things this UI cannot anticipate: the GPU it rented,
-    // the pod's hourly rate, queue position. They flow into the same grid as
-    // the built-in stats, so a new field looks native without a subs change.
-    const KNOWN = new Set([
-        'total_cycles', 'proving_cycles_done', 'segments', 'segments_done',
-        'elapsed_seconds', 'estimated_total_seconds', 'first_segment_seconds',
-        'phase', 'phase_total', 'phase_one_fraction',
-    ]);
-    for (const [k, v] of Object.entries(p)) {
-        if (KNOWN.has(k) || v == null || typeof v === 'object') continue;
-        const label = k.replace(/_/g, ' ');
-        // Labels are ellipsized to keep tiles uniform, so the full name has to
-        // stay reachable — a custom prover can name a field anything.
-        h += stat(label, typeof v === 'number' ? v.toLocaleString() : String(v), { title: label });
+    // Capped and scrolled: a chatty prover must not be able to grow the page
+    // without bound. Newest last, so it reads like a terminal.
+    if (log.length) {
+        const shown = log.slice(-200);
+        h += `<pre class="prove-log">${shown.map(l => esc(l)).join('\n')}</pre>`;
     }
 
-    h += '</div>';
     return h + '</div>' + idRow;
 }
+
 
 async function cancelProving() {
     if (!confirm('Cancel this proof?\n\nA queued job stops immediately. One already running finishes on the prover and its result is discarded — the GPU time is not reclaimed.')) return;
