@@ -185,9 +185,24 @@ impl LiveSpaceInfo {
         }
 
         let sub = name.subspace().unwrap();
+
+        // Split the two tree operations. Both resolve a snapshot by root and
+        // then walk the tree, so when a cert is slow this says which half —
+        // the membership check or the inclusion proof — is responsible.
+        let lookup_started = std::time::Instant::now();
         let is_final = self.local.lookup_handle_in_tree(&sub, tip).await?.is_some();
+        let lookup_ms = lookup_started.elapsed().as_millis();
+
         if is_final {
-            return self.local.issue_cert(&name, tip.unwrap()).await;
+            let proof_started = std::time::Instant::now();
+            let cert = self.local.issue_cert(&name, tip.unwrap()).await;
+            log::debug!(
+                "  {} final: lookup {}ms, proof {}ms",
+                name,
+                lookup_ms,
+                proof_started.elapsed().as_millis()
+            );
+            return cert;
         }
 
         // temp cert
@@ -978,6 +993,16 @@ impl Operator {
         local_space.save_estimate(commitment_id, estimate_json).await
     }
 
+    /// Drop a commitment's estimate once the proof it described has finished.
+    ///
+    /// The next proof of the same commitment is a different shape — a fold is
+    /// not a step — so leaving the old figures visible presents them as a
+    /// forecast for work they say nothing about.
+    pub async fn clear_estimate(&self, space: &SLabel, commitment_id: i64) -> anyhow::Result<()> {
+        let local_space = self.get_local_space(space)?;
+        local_space.clear_estimate(commitment_id).await
+    }
+
     /// Get input for SNARK compression.
     pub async fn get_compress_input(
         &self,
@@ -1147,7 +1172,7 @@ impl Operator {
 
         // No commitments yet - show message based on staged count
         let Some(commitment) = commitment else {
-            let unpublished = storage.select_handles(crate::storage::HandleSelector::Unpublished(None)).await?.len();
+            let unpublished = storage.count_unpublished(None).await?;
             let message = if staged_count > 0 {
                 Some(format!(
                     "{} handle(s) staged. Ready to commit.",
@@ -1316,7 +1341,7 @@ impl Operator {
         if let Some(_) = confirmed_idx {
             storage.reset_stale_temp_certs(Some(&commitment.root)).await?;
         }
-        let unpublished = storage.select_handles(crate::storage::HandleSelector::Unpublished(confirmed_idx)).await?.len();
+        let unpublished = storage.count_unpublished(confirmed_idx).await?;
 
         let commitments = storage.list_commitments().await?;
         let pending_proofs = crate::core::count_pending_proofs(&commitments);
@@ -1493,17 +1518,49 @@ impl Operator {
 
         for space_data in space_datas {
             let space = SName::from_space(&space_data.info.space);
+
+            let root_started = std::time::Instant::now();
             let root_cert = space_data
                 .info
                 .issue_cert(rpc, &self.wallet, &space)
                 .await?;
+            log::debug!(
+                "[{}] root cert issued in {}ms",
+                space_data.info.space,
+                root_started.elapsed().as_millis()
+            );
             certs.push(root_cert);
+
+            // Per-handle timing. Certificate issuance dominates publishing, and
+            // the cost per handle is what tells you whether a change actually
+            // helped — a batch total hides which handles were slow and folds in
+            // fixed per-batch work.
+            let batch_started = std::time::Instant::now();
+            let mut slowest_ms = 0u128;
+            let count = space_data.handles.len();
+
             for handle in space_data.handles {
+                let started = std::time::Instant::now();
                 let cert = space_data
                     .info
                     .issue_cert(rpc, &self.wallet, &handle)
                     .await?;
+                let ms = started.elapsed().as_millis();
+                slowest_ms = slowest_ms.max(ms);
+                log::debug!("[{}] cert for {} in {}ms", space_data.info.space, handle, ms);
                 certs.push(cert);
+            }
+
+            if count > 0 {
+                let total = batch_started.elapsed();
+                log::info!(
+                    "[{}] issued {} certs in {}ms ({:.1}ms/cert, slowest {}ms)",
+                    space_data.info.space,
+                    count,
+                    total.as_millis(),
+                    total.as_millis() as f64 / count as f64,
+                    slowest_ms,
+                );
             }
         }
 
@@ -1537,19 +1594,27 @@ impl Operator {
             log::info!("[{}] Reset {} stale temp cert(s) for republishing", space, reset);
         }
 
-        let all_handles = storage.select_handles(
-            if only.is_empty() {
-                crate::storage::HandleSelector::Unpublished(confirmed_idx)
+        // Only the batch is fetched. `total` comes from a COUNT so the caller
+        // still learns how much is left without paying to materialise it.
+        let batch: Vec<_> = storage
+            .select_handles(if only.is_empty() {
+                crate::storage::HandleSelector::Unpublished(confirmed_idx, Some(limit))
             } else {
                 crate::storage::HandleSelector::ByName(only.to_vec())
-            }
-        ).await?;
-        if all_handles.is_empty() {
+            })
+            .await?
+            .into_iter()
+            .take(limit)
+            .collect();
+        if batch.is_empty() {
             return Ok((0, 0));
         }
 
-        let total = all_handles.len();
-        let batch: Vec<_> = all_handles.into_iter().take(limit).collect();
+        let total = if only.is_empty() {
+            storage.count_unpublished(confirmed_idx).await?
+        } else {
+            batch.len()
+        };
 
         let handle_names: Vec<SName> = batch
             .iter()
@@ -1581,8 +1646,17 @@ impl Operator {
         }
         if !final_names.is_empty() {
             storage.mark_handles_published(&final_names, "final", None).await?;
-            // If no more committed handles need publishing, mark commitment as published
-            if storage.select_handles(crate::storage::HandleSelector::Unpublished(confirmed_idx)).await?.iter().all(|h| h.commitment_root.is_none()) {
+            // If no more committed handles need publishing, mark commitment as
+            // published. Only the first page is examined: the predicate is
+            // "does any committed handle remain", so one counter-example is
+            // enough and scanning the whole backlog to learn it was waste.
+            let remaining = storage
+                .select_handles(crate::storage::HandleSelector::Unpublished(
+                    confirmed_idx,
+                    Some(limit.max(1)),
+                ))
+                .await?;
+            if remaining.iter().all(|h| h.commitment_root.is_none()) {
                 if let Some(commitment) = storage.get_last_commitment().await? {
                     if commitment.published_at.is_none() {
                         storage.mark_commitment_published(commitment.id).await?;

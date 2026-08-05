@@ -2299,7 +2299,7 @@ dependencies = [
 [[package]]
 name = "fabric-resolver"
 version = "0.2.7"
-source = "git+https://github.com/spacesprotocol/certrelay.git#15234646f27ff9fcee96d6d1aa79e1fce60d4f88"
+source = "git+https://github.com/spacesprotocol/certrelay.git#e680aff03be1b87778f22b8c4f284da52b443333"
 dependencies = [
  "borsh",
  "dashmap",
@@ -4918,7 +4918,7 @@ dependencies = [
 [[package]]
 name = "relay"
 version = "0.2.7"
-source = "git+https://github.com/spacesprotocol/certrelay.git#15234646f27ff9fcee96d6d1aa79e1fce60d4f88"
+source = "git+https://github.com/spacesprotocol/certrelay.git#e680aff03be1b87778f22b8c4f284da52b443333"
 dependencies = [
  "anyhow",
  "axum 0.8.3",

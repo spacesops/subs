@@ -179,6 +179,14 @@ async fn proving_loop(state: AppState) {
                 match poll_job(&state, &prover_endpoint, prover_auth_token.as_deref(), space, &job_key, &job_id, commitment_id, is_fold).await {
                     Ok(true) => {
                         tracing::info!("[{}] Proof complete for commitment {}", space, commitment_id);
+                        // The estimate described the proof that just finished.
+                        // A commitment holds only one, so leaving it would show
+                        // the completed step's figures beside a Prove button
+                        // offering the fold — a different shape of work.
+                        // Cleared here; the loop refetches for whatever is next.
+                        if let Err(e) = state.operator.clear_estimate(space, commitment_id).await {
+                            tracing::debug!("[{}] Could not clear estimate: {}", space, e);
+                        }
                     }
                     Ok(false) => {}
                     Err(e) => {
