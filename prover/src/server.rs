@@ -637,6 +637,12 @@ async fn run_worker(state: Arc<ServerState>, mut rx: mpsc::Receiver<String>) {
         {
             let mut jobs = state.jobs.write().await;
             if let Some(job) = jobs.get_mut(&job_id) {
+                // Stop the progress clock before recording the outcome, so a
+                // finished job reports how long it took rather than how long
+                // ago it started.
+                if let Some(sink) = &job.progress {
+                    sink.finish();
+                }
                 match result {
                     // Cancelled mid-proof: the work finished, but the caller no
                     // longer wants it, so the receipt is dropped rather than
@@ -653,6 +659,13 @@ async fn run_worker(state: Arc<ServerState>, mut rx: mpsc::Receiver<String>) {
                         tracing::info!("Job {} complete ({} bytes)", job_id, receipt.len());
                         job.status = JobStatus::Complete;
                         job.receipt = Some(receipt);
+                    }
+                    // A cancelled job that then errored is still cancelled: the
+                    // caller asked for it to stop and does not want the failure
+                    // of work they abandoned reported back as a fault.
+                    Err(e) if job.cancel_requested => {
+                        tracing::info!("Job {} cancelled; it ended with: {}", job_id, e);
+                        job.status = JobStatus::Cancelled;
                     }
                     Err(e) => {
                         tracing::error!("Job {} failed: {}", job_id, e);

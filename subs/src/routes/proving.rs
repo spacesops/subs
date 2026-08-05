@@ -16,6 +16,10 @@ use subs_core::CompressInput;
 
 use crate::state::AppState;
 
+fn one() -> u8 {
+    1
+}
+
 /// Live proving progress, forwarded verbatim from the prover.
 ///
 /// The prover is the only place that knows how far along a proof is; subs just
@@ -30,6 +34,16 @@ pub struct JobProgress {
     pub elapsed_seconds: f64,
     pub estimated_total_seconds: Option<f64>,
     pub first_segment_seconds: Option<f64>,
+    /// Which phase the prover is in, and how many there are. Defaulted rather
+    /// than optional so a prover that predates phase reporting still
+    /// deserializes and simply reads as "phase 1 of 1" — one determinate bar,
+    /// which is exactly how it used to behave.
+    #[serde(default = "one")]
+    pub phase: u8,
+    #[serde(default = "one")]
+    pub phase_total: u8,
+    #[serde(default)]
+    pub phase_one_fraction: Option<f64>,
     /// Anything else the prover reported.
     ///
     /// A custom prover knows things this one cannot — which GPU it rented, what
@@ -475,12 +489,15 @@ pub async fn poll_prover(
         ));
     }
 
+    /// Only what this poll acts on. Progress is deliberately absent: the
+    /// pipeline view fetches it separately, and parsing it here would make a
+    /// custom prover's differently-shaped `progress` fail the whole status
+    /// response — turning a healthy poll into a gateway error over a field
+    /// nothing reads.
     #[derive(Deserialize)]
     struct JobStatusResponse {
         status: String,
         error: Option<String>,
-        #[serde(default)]
-        progress: Option<JobProgress>,
     }
 
     let job_status: JobStatusResponse = response
