@@ -68,6 +68,20 @@ impl SkipReason {
             SkipReason::AlreadyStaged => "already staged",
         }
     }
+
+    /// Stable token reported to a registry in the ack body.
+    ///
+    /// Separate from `as_str`, which is prose for logs and can be reworded
+    /// freely. These are a protocol contract: a registry matches on them to
+    /// decide what to tell a user, so they must not change once published.
+    pub fn as_outcome(&self) -> &'static str {
+        match self {
+            SkipReason::AlreadyCommittedDifferentSpk => "already_committed_different_spk",
+            SkipReason::AlreadyStagedDifferentSpk => "already_staged_different_spk",
+            SkipReason::AlreadyCommitted => "already_committed_same_spk",
+            SkipReason::AlreadyStaged => "already_staged_same_spk",
+        }
+    }
 }
 
 /// Result of committing staged entries

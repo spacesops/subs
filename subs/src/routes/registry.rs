@@ -33,6 +33,27 @@ struct PendingHandle {
     script_pubkey: String,
 }
 
+/// One handle's fate, reported to the registry on ack.
+///
+/// Outcomes are a protocol contract — a registry matches on them to decide
+/// what to show a user. All of them are terminal: the handle is settled and
+/// will not be offered again. Anything retryable is simply left unacked and
+/// stays in /pending.
+#[derive(Serialize)]
+pub struct AckEntry {
+    pub handle: String,
+    pub outcome: &'static str,
+}
+
+impl AckEntry {
+    fn new(handle: &str, outcome: &'static str) -> Self {
+        Self {
+            handle: handle.to_string(),
+            outcome,
+        }
+    }
+}
+
 /// Outcome of a single pull -> stage -> ack cycle.
 pub struct SyncOutcome {
     pub pulled: usize,
@@ -56,7 +77,80 @@ pub async fn sync_once(
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
 
-    let mut req = client.get(format!("{}/pending", base));
+    // Scope is what this wallet can act on, which is wider than what it is
+    // currently running: a space delegated on-chain but never started still
+    // counts, because staging one of its handles auto-adopts it via
+    // load_or_create_space. Leaving those out would be a closed loop — the
+    // handles would never arrive, so the space would never be created, so it
+    // would never enter scope, and the work would sit in the registry
+    // invisible to both sides.
+    let mut spaces: Vec<String> = state
+        .operator
+        .list_spaces()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    match state.operator.list_delegated_spaces().await {
+        Ok(delegated) => spaces.extend(delegated.iter().map(|s| s.to_string())),
+        Err(e) => {
+            // One RPC call; if the node is unreachable we still sync the
+            // spaces already running rather than stalling the whole cycle.
+            tracing::debug!("Could not list delegated spaces: {}", e);
+        }
+    }
+    spaces.sort();
+    spaces.dedup();
+
+    if spaces.is_empty() {
+        return Ok(SyncOutcome {
+            pulled: 0,
+            staged: 0,
+            errors: vec![],
+        });
+    }
+
+    let mut pulled = 0usize;
+    let mut staged = 0usize;
+    let mut errors: Vec<String> = Vec::new();
+
+    // One space per request, pulled and settled before moving on. Keeps the
+    // URL bounded however many spaces an operator runs, gives the registry a
+    // natural place to paginate, and means a space that cannot be staged
+    // cannot affect any other.
+    for space in &spaces {
+        match sync_space(state, &client, base, auth_token, space).await {
+            Ok((p, s, mut errs)) => {
+                pulled += p;
+                staged += s;
+                errors.append(&mut errs);
+            }
+            Err(e) => errors.push(format!("{}: {}", space, e)),
+        }
+    }
+
+    Ok(SyncOutcome {
+        pulled,
+        staged,
+        errors,
+    })
+}
+
+/// Pull, stage and acknowledge one space's pending handles.
+///
+/// Returns (pulled, staged, non-fatal errors). An Err is a failure of the
+/// space as a whole — an unreachable registry, a rejected token — and leaves
+/// everything for that space pending.
+async fn sync_space(
+    state: &AppState,
+    client: &reqwest::Client,
+    base: &str,
+    auth_token: Option<&str>,
+    space: &str,
+) -> anyhow::Result<(usize, usize, Vec<String>)> {
+    let mut req = client
+        .get(format!("{}/pending", base))
+        .query(&[("space", space)]);
     if let Some(t) = auth_token {
         req = req.bearer_auth(t);
     }
@@ -78,108 +172,111 @@ pub async fn sync_once(
         .map_err(|e| anyhow::anyhow!("invalid response from registry: {}", e))?;
 
     if pending.handles.is_empty() {
-        return Ok(SyncOutcome {
-            pulled: 0,
-            staged: 0,
-            errors: vec![],
-        });
+        return Ok((0, 0, vec![]));
     }
 
-    tracing::info!("Pulled {} pending handles from registry", pending.handles.len());
-
-    let mut errors = Vec::new();
-
-    // Group by space before staging. add_requests aborts the whole call if any
-    // one space can't be loaded — an unknown space, a wallet that can't operate
-    // it — so batching every space together lets one bad handle sink handles
-    // that would otherwise stage fine.
-    let mut by_space: std::collections::HashMap<String, Vec<(String, subs_core::HandleRequest)>> =
+    let mut errors: Vec<String> = Vec::new();
+    let mut outcomes: Vec<AckEntry> = Vec::new();
+    let mut requests: Vec<subs_core::HandleRequest> = Vec::new();
+    let mut submitted: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
 
     for handle in &pending.handles {
-        let handle_name: spaces_protocol::sname::SName = match handle.handle.parse() {
+        let parsed: spaces_protocol::sname::SName = match handle.handle.parse() {
             Ok(h) => h,
             Err(e) => {
                 errors.push(format!("{}: invalid handle: {}", handle.handle, e));
+                // Terminal: it will never parse, so settle it rather than
+                // leave it to be re-pulled forever as a poison entry.
+                outcomes.push(AckEntry::new(&handle.handle, "invalid"));
                 continue;
             }
         };
 
-        let space = match handle_name.space() {
-            Some(s) => s.to_string(),
-            None => {
-                errors.push(format!("{}: handle has no space", handle.handle));
+        // We asked for one space; anything else is a registry bug. Skipping
+        // rather than forwarding keeps add_requests to a single space, which
+        // is what stops one bad space aborting the whole call.
+        match parsed.space().map(|s| s.to_string()) {
+            Some(s) if s == space => {}
+            other => {
+                errors.push(format!(
+                    "{}: registry returned a handle for {:?} when {} was requested",
+                    handle.handle, other, space
+                ));
                 continue;
             }
-        };
+        }
 
-        by_space.entry(space).or_default().push((
-            handle.handle.clone(),
-            subs_core::HandleRequest {
-                handle: handle_name,
-                script_pubkey: handle.script_pubkey.clone(),
-                dev_private_key: None,
-            },
-        ));
+        submitted.insert(parsed.to_string(), handle.handle.clone());
+        requests.push(subs_core::HandleRequest {
+            handle: parsed,
+            script_pubkey: handle.script_pubkey.clone(),
+            dev_private_key: None,
+        });
     }
 
-    let mut staged = 0;
-    let mut to_ack: Vec<String> = Vec::new();
+    let original = |parsed: &spaces_protocol::sname::SName| -> String {
+        submitted
+            .get(&parsed.to_string())
+            .cloned()
+            .unwrap_or_else(|| parsed.to_string())
+    };
 
-    for (space, entries) in by_space {
-        let (names, requests): (Vec<String>, Vec<subs_core::HandleRequest>) =
-            entries.into_iter().unzip();
-
+    let mut staged = 0usize;
+    if !requests.is_empty() {
         match state.operator.add_requests(requests).await {
             Ok(result) => {
                 tracing::info!("[{}] Staged {} handles", space, result.total_added);
+                staged = result.total_added;
+
                 for space_result in &result.by_space {
+                    for added in &space_result.added {
+                        outcomes.push(AckEntry::new(&original(added), "staged"));
+                    }
+                    // Skips are settled: already staged, already committed, or
+                    // taken under another script pubkey. The outcome is what
+                    // tells the registry which it was.
                     for skip in &space_result.skipped {
-                        tracing::info!("Skipped: {} ({:?})", skip.handle, skip.reason);
+                        tracing::info!("Skipped: {} ({})", skip.handle, skip.reason.as_str());
+                        outcomes.push(AckEntry::new(
+                            &original(&skip.handle),
+                            skip.reason.as_outcome(),
+                        ));
                     }
                 }
-                staged += result.total_added;
-                // Skips are settled outcomes (already staged, already
-                // committed, taken by another spk), so they're acked too —
-                // leaving them pending would re-pull them forever.
-                to_ack.extend(names);
             }
             Err(e) => {
-                // Deliberately not acked. Staging never happened, so acking
-                // would mark them done at the registry and lose them; leaving
-                // them pending means a fixed operator config picks them up.
-                errors.push(format!("{}: failed to stage: {}", space, e));
+                // Retryable: staging never happened, so these get no outcome
+                // and stay pending for a later cycle to collect once the
+                // operator's configuration is fixed.
+                errors.push(format!("failed to stage: {}", e));
             }
         }
     }
 
-    // A failed ack leaves handles Pending at the registry, and the next cycle
-    // re-pulls and re-acks them (add_requests dedupes), so this self-heals.
-    if !to_ack.is_empty() {
-        if let Err(e) = ack(&client, base, auth_token, &to_ack).await {
-            // Not fatal: staging already succeeded locally.
+    // A failed ack leaves handles pending, and the next cycle re-pulls and
+    // re-acks them (add_requests dedupes), so this self-heals.
+    if !outcomes.is_empty() {
+        if let Err(e) = ack(client, base, auth_token, &outcomes).await {
             tracing::warn!("Failed to acknowledge handles to registry: {}", e);
             errors.push(format!("ack failed: {}", e));
         }
     }
 
-    Ok(SyncOutcome {
-        pulled: pending.handles.len(),
-        staged,
-        errors,
-    })
+    Ok((pending.handles.len(), staged, errors))
 }
+
 
 /// POST /ack, checking the response rather than firing and forgetting.
 async fn ack(
     client: &reqwest::Client,
     base: &str,
     auth_token: Option<&str>,
-    handles: &[String],
+    handles: &[AckEntry],
 ) -> anyhow::Result<()> {
     #[derive(Serialize)]
     struct AckRequest<'a> {
-        handles: &'a [String],
+        handles: &'a [AckEntry],
     }
 
     let mut req = client
