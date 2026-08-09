@@ -91,8 +91,11 @@ pub struct Handle {
 
 /// Selector for querying handles for publishing.
 pub enum HandleSelector {
-    /// Handles needing certs: unpublished or temp-published ready for finalization.
-    Unpublished(Option<usize>),
+    /// Handles needing certs: unpublished or temp-published ready for
+    /// finalization. The second field caps how many are returned; `None` means
+    /// unbounded, which is only appropriate when the caller genuinely needs
+    /// every row.
+    Unpublished(Option<usize>, Option<usize>),
     /// Specific committed handles by name (regardless of publish status).
     ByName(Vec<String>),
 }
@@ -409,13 +412,18 @@ impl Storage {
         .await?
     }
 
+    /// Store or clear a commitment's proving estimate.
+    ///
+    /// `None` clears it. An estimate describes one specific proof, and the
+    /// commitment row holds only one, so a finished proof's estimate has to be
+    /// cleared rather than left to be read as a prediction for the next.
     pub async fn update_commitment_estimate(
         &self,
         commitment_id: i64,
-        estimate_json: &str,
+        estimate_json: Option<&str>,
     ) -> anyhow::Result<()> {
         let conn = self.conn.clone();
-        let json = estimate_json.to_string();
+        let json = estimate_json.map(|s| s.to_string());
         spawn_blocking(move || {
             let conn = conn.lock().unwrap();
             conn.execute(
@@ -921,6 +929,26 @@ impl Storage {
     // Publishing
 
     /// Select handles for publishing based on the given selector.
+    /// How many handles still need certificates.
+    ///
+    /// Counted in SQL. The pipeline reports this on every poll, and loading
+    /// every row just to call `.len()` made that cost grow with the backlog.
+    pub async fn count_unpublished(&self, confirmed_idx: Option<usize>) -> anyhow::Result<usize> {
+        let conn = self.conn.clone();
+        spawn_blocking(move || {
+            let conn = conn.lock().unwrap();
+            let idx_param = confirmed_idx.map(|v| v as i64).unwrap_or(-1);
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM handles WHERE publish_status IS NULL \
+                 OR (publish_status = 'temp' AND commitment_idx IS NOT NULL AND commitment_idx <= ?)",
+                params![idx_param],
+                |row| row.get(0),
+            )?;
+            Ok(count as usize)
+        })
+        .await?
+    }
+
     pub async fn select_handles(&self, selector: HandleSelector) -> anyhow::Result<Vec<Handle>> {
         let conn = self.conn.clone();
         spawn_blocking(move || {
@@ -940,15 +968,23 @@ impl Storage {
                 })
             };
             match selector {
-                HandleSelector::Unpublished(confirmed_idx) => {
+                HandleSelector::Unpublished(confirmed_idx, limit) => {
+                    // Bounded in SQL. Callers publish a batch at a time, so
+                    // materialising the whole backlog to take the first N made
+                    // each cycle proportional to work already queued — slower
+                    // the further behind it fell.
                     let sql = format!(
                         "SELECT {} FROM handles WHERE publish_status IS NULL \
                          OR (publish_status = 'temp' AND commitment_idx IS NOT NULL AND commitment_idx <= ?) \
-                         ORDER BY name ASC", cols
+                         ORDER BY name ASC LIMIT ?", cols
                     );
                     let idx_param = confirmed_idx.map(|v| v as i64).unwrap_or(-1);
+                    // SQLite treats a negative LIMIT as unbounded.
+                    let limit_param = limit.map(|v| v as i64).unwrap_or(-1);
                     let mut stmt = conn.prepare(&sql)?;
-                    let result: Vec<Handle> = stmt.query_map(params![idx_param], map_row)?.collect::<Result<Vec<_>, _>>()?;
+                    let result: Vec<Handle> = stmt
+                        .query_map(params![idx_param, limit_param], map_row)?
+                        .collect::<Result<Vec<_>, _>>()?;
                     Ok(result)
                 }
                 HandleSelector::ByName(names) => {
@@ -1008,9 +1044,14 @@ impl Storage {
                        AND (published_temp_at_tip IS NULL OR published_temp_at_tip != ?)",
                     params![tip],
                 )?,
+                // No tip: only certs published against some earlier tip are
+                // stale. A temp cert issued when there was already no tip is
+                // unchanged, and resetting it unconditionally made the publish
+                // loop republish the same cert on every pass.
                 None => conn.execute(
                     "UPDATE handles SET publish_status = NULL, published_temp_at_tip = NULL
-                     WHERE publish_status = 'temp'",
+                     WHERE publish_status = 'temp'
+                       AND published_temp_at_tip IS NOT NULL",
                     [],
                 )?,
             };

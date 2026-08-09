@@ -76,6 +76,8 @@ See [.env.example](.env.example) for a full template.
 | `SUBS_SPACED_RPC_COOKIE` | `--rpc-cookie` | `spaced` RPC cookie file path |
 | `SUBS_PROVER_ENDPOINT` | *(Settings UI)* | Prover URL written to `config.db` at startup |
 | `SUBS_REGISTRY_ENDPOINT` | *(Settings UI)* | Registry URL written to `config.db` at startup |
+| `SUBS_BASIC_AUTH_USER` / `SUBS_BASIC_AUTH_PASSWORD` | `--basic-auth-user` / `--basic-auth-password` | Optional HTTP Basic for UI/API (both required; `/health` stays anonymous) |
+| `SUBS_PUBLISH_REQUIRE_FINALIZED` | `--publish-require-finalized` | Block publish until commitments have 150 confirmations |
 | `SUBS_TEST_RIG` | `--test-rig` | Enable test rig (`1`, `true`, `yes`) |
 | `SUBS_TEST_RIG_DIR` | `--test-rig-dir` | Test rig data directory |
 
@@ -85,7 +87,8 @@ See [.env.example](.env.example) for a full template.
 |----------|----------|-------------|
 | `SUBS_PROVER_SERVER` | `--server` | Run as HTTP server (`1`, `true`, `yes`) |
 | `SUBS_PROVER_PORT` | `--server-port` | Server port (default `8888`) |
-| `SUBS_DATA_DIR` | *(env only)* | Data dir for prover runtime files (calibration cache at `SUBS_DATA_DIR/subs-prover-calibration.json`) |
+| `PROVER_AUTH_TOKEN` | *(env only)* | Optional bearer token; when set, all prover routes require `Authorization: Bearer <token>` |
+| `PROVER_CALIBRATE` | `--calibrate` | Opt-in startup calibration (blocks listen until done; needed for `/estimate`) |
 | `SUBS_PROVER_INPUT` | `-i` / `--input` | Input file (prove/compress subcommands) |
 | `SUBS_PROVER_OUTPUT` | `-o` / `--output` | Output file (prove/compress subcommands) |
 | `SUBS_PROVER_BENCH_EXISTING` | `--existing` | Bench: existing handle count |
@@ -96,6 +99,8 @@ See [.env.example](.env.example) for a full template.
 | Variable | CLI flag | Description |
 |----------|----------|-------------|
 | `REGISTRY_SERVER_PORT` | `--port` | HTTP server port (default `8081`) |
+| `REGISTRY_API_KEY` | *(env only, required)* | Bearer token for `POST /register` |
+| `SUBSD_API_KEY` | *(env only, required)* | Bearer token for subs↔registry endpoints (`/health`, `/pending`, `/ack`, `/committed`) |
 
 ### Examples
 
@@ -127,6 +132,8 @@ subs-prover
 ```bash
 # registry-server
 export REGISTRY_SERVER_PORT=8081
+export REGISTRY_API_KEY=change-me-intake
+export SUBSD_API_KEY=change-me-subsd
 registry-server
 ```
 
@@ -313,6 +320,12 @@ subs \
 Then open http://localhost:7777 in a browser. Under **Settings**, set the prover URL to `http://127.0.0.1:8888` so subs can dispatch proofs.
 
 From the UI you can stage handles, run local commits, broadcast on-chain commitments, and issue / export certificates.
+
+### 3. Connect a registry (optional)
+
+A registry is the public-facing service where users request handles, keeping subs private since it holds wallet keys. subs polls it, stages what it finds, and publishes certificates.
+
+See [REGISTRY.md](REGISTRY.md) to build one, and [`examples/registry-server`](examples/registry-server) for a working reference.
 
 ### Test rig (local dev)
 

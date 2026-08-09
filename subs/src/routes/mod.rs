@@ -6,9 +6,9 @@ pub mod commits;
 pub mod config;
 pub mod console;
 mod error;
-mod logging;
 pub mod proving;
 pub mod query;
+pub mod logs;
 pub mod registry;
 pub mod requests;
 pub mod status;
@@ -17,7 +17,6 @@ pub mod web;
 pub use error::json_error;
 
 use axum::{
-    middleware,
     routing::{get, post},
     Router,
 };
@@ -32,6 +31,7 @@ pub fn router() -> Router<AppState> {
         .route("/ui/operate", get(web::operate_page))
         .route("/ui/query", get(web::query_page))
         .route("/ui/settings", get(web::settings_page))
+        .route("/ui/logs", get(web::logs_page))
         .route("/ui/transactions", get(web::transactions_page))
         .route("/ui/spaces/:space", get(web::space_page))
         .route("/ui/spaces/:space/handles/:handle", get(web::handle_page))
@@ -63,6 +63,7 @@ pub fn router() -> Router<AppState> {
         .route("/spaces/:space/proving/fulfill", post(proving::fulfill))
         .route("/spaces/:space/proving/push", post(proving::push_to_prover))
         .route("/spaces/:space/proving/poll", post(proving::poll_prover))
+        .route("/spaces/:space/proving/cancel", post(proving::cancel_proving))
         .route("/spaces/:space/proving/estimate", get(proving::get_estimate))
         .route("/spaces/:space/compress", get(proving::get_compress_input))
         .route("/spaces/:space/snark", post(proving::save_snark))
@@ -83,8 +84,8 @@ pub fn router() -> Router<AppState> {
         .route("/config/test/prover", post(config::test_prover))
         .route("/config/test/registry", post(config::test_registry))
         // API: Registry integration
+        .route("/logs", get(logs::get_logs))
         .route("/registry/status", get(registry::registry_status))
         .route("/registry/sync", post(registry::sync_from_registry))
         .route("/registry/notify", post(registry::notify_registry))
-        .layer(middleware::from_fn(logging::log_api_requests))
 }

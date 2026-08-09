@@ -2,9 +2,7 @@
 .env.*
 !.env.example
 .DS_Store
-Cargo.lock
 .vscode
-methods/guest/Cargo.lock
 target/
 *.bin
 *.priv
@@ -19,4 +17,3 @@ datamadd/
 NOTES.md
 .cargo/
 subspaces.tar
-

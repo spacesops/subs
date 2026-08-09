@@ -5,55 +5,23 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::{Path as StdPath, PathBuf};
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, Request, State},
     http::StatusCode,
-    middleware,
-    response::IntoResponse,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::sync::{mpsc, RwLock};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
-use crate::Prover;
-use subs_types::{CalibrationInfo, CompressInput, ProvingRequest};
-
-const CALIBRATION_CACHE_FILE: &str = "subs-prover-calibration.json";
-
-#[derive(Clone, Serialize, Deserialize)]
-struct CalibrationCache {
-    info: CalibrationInfo,
-}
-
-fn calibration_cache_path(data_dir: &StdPath) -> PathBuf {
-    data_dir.join(CALIBRATION_CACHE_FILE)
-}
-
-fn load_calibration_cache(path: &StdPath) -> anyhow::Result<Option<CalibrationInfo>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let bytes = std::fs::read(path)?;
-    let cache: CalibrationCache = serde_json::from_slice(&bytes)?;
-    Ok(Some(cache.info))
-}
-
-fn save_calibration_cache(path: &StdPath, info: &CalibrationInfo) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("tmp");
-    let bytes = serde_json::to_vec_pretty(&CalibrationCache { info: info.clone() })?;
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
-}
+use crate::{JobProgress, ProgressSink, Prover};
+use subs_types::{CompressInput, ProvingRequest};
 
 /// Job status
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -63,6 +31,7 @@ pub enum JobStatus {
     Processing,
     Complete,
     Failed,
+    Cancelled,
 }
 
 /// Job type
@@ -83,6 +52,13 @@ pub struct Job {
     pub request: JobRequest,
     pub receipt: Option<Vec<u8>>,
     pub error: Option<String>,
+    /// Live counters, shared with the proving thread. Attached before proving
+    /// starts so /jobs/:id can report progress while the job is still running.
+    pub progress: Option<Arc<ProgressSink>>,
+    /// Set by /jobs/:id/cancel. A queued job never starts; a running one is
+    /// abandoned when it finishes — see cancel_job for why it cannot be
+    /// interrupted mid-proof.
+    pub cancel_requested: bool,
 }
 
 #[derive(Clone)]
@@ -98,27 +74,15 @@ pub struct ServerState {
     /// Calibration data from startup benchmark.
     /// None if calibration hasn't run or failed.
     calibration: RwLock<Option<subs_types::CalibrationInfo>>,
-    /// Optional HTTP Basic auth credentials. `None` disables auth entirely.
-    basic_auth: Option<(String, String)>,
 }
 
 impl ServerState {
-    pub fn new(
-        job_sender: mpsc::Sender<String>,
-        calibration: Option<CalibrationInfo>,
-        basic_auth: Option<(String, String)>,
-    ) -> Self {
+    pub fn new(job_sender: mpsc::Sender<String>) -> Self {
         Self {
             jobs: RwLock::new(HashMap::new()),
             job_sender,
-            calibration: RwLock::new(calibration),
-            basic_auth,
+            calibration: RwLock::new(None),
         }
-    }
-
-    /// Configured HTTP Basic auth credentials, if any.
-    pub fn basic_auth(&self) -> &Option<(String, String)> {
-        &self.basic_auth
     }
 }
 
@@ -136,6 +100,10 @@ pub struct JobStatusResponse {
     pub job_type: JobType,
     pub status: JobStatus,
     pub error: Option<String>,
+    /// Absent until execution finishes and proving begins, and for compress
+    /// jobs, which have no segments. Consumers that predate this ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<JobProgress>,
 }
 
 /// Error response
@@ -145,11 +113,20 @@ pub struct ErrorResponse {
 }
 
 /// Start the prover server
-pub async fn run_server(
-    port: u16,
-    data_dir: PathBuf,
-    basic_auth: Option<(String, String)>,
-) -> anyhow::Result<()> {
+/// Maximum accepted request body.
+///
+/// Proving requests scale with the batch: the zk input alone is 64 bytes per
+/// handle, so a 50k-handle commitment is ~3 MB before the exclusion proof, and
+/// axum's 2 MB default rejects it with a 413 that reads like a prover fault.
+/// Bodies are buffered in memory, so this is a memory bound as much as a
+/// policy one — generous rather than tight, since the failure mode of setting
+/// it too low is a rejected commitment, and PROVER_AUTH_TOKEN gates the port.
+///
+/// Kept in step with MAX_BODY_BYTES in the runpod proxy: whichever hop has the
+/// lower ceiling is the one that 413s.
+const MAX_BODY_BYTES: usize = 512 * 1024 * 1024;
+
+pub async fn run_server(port: u16, calibrate: bool) -> anyhow::Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -160,76 +137,40 @@ pub async fn run_server(
 
     // Create job channel
     let (tx, rx) = mpsc::channel::<String>(100);
-    let cache_path = calibration_cache_path(&data_dir);
-    let cached_calibration = match load_calibration_cache(&cache_path) {
-        Ok(Some(info)) => {
-            tracing::info!(
-                "Loaded calibration cache from {}: {:.2}s per segment at po2={}, {:.0} cycles/sec",
-                cache_path.display(),
-                info.seconds_per_segment,
-                info.calibration_po2,
-                info.cycles_per_sec,
-            );
-            Some(info)
-        }
-        Ok(None) => {
-            tracing::info!(
-                "No calibration cache found at {}; will calibrate in background",
-                cache_path.display()
-            );
-            None
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to load calibration cache from {}: {}; calibrating in background",
-                cache_path.display(),
-                e
-            );
-            None
-        }
-    };
 
     // Create shared state
-    let state = Arc::new(ServerState::new(tx, cached_calibration, basic_auth));
+    let state = Arc::new(ServerState::new(tx));
 
-    // Calibrate proving throughput only when cache is missing/broken.
-    // Do this in background so server startup isn't blocked.
-    if state.calibration.read().await.is_none() {
+    // Calibrate proving throughput on startup. This blocks the listener, so
+    // /health stays unanswered until it completes — deliberate, since an
+    // estimate is useless before it, but billable on a short-lived pod. Hence
+    // opt-in: most runs want the server answering immediately.
+    if !calibrate {
+        tracing::info!("Calibration off (pass --calibrate to enable); /estimate will be unavailable");
+    } else {
+        tracing::info!("Calibrating proving throughput...");
         let calibrate_state = state.clone();
-        let cache_path = cache_path.clone();
-        tokio::spawn(async move {
-            tracing::info!("Calibrating proving throughput...");
-            let calibrate_handle = tokio::task::spawn_blocking(move || {
-                let prover = Prover::new();
-                prover.calibrate()
-            });
-            match calibrate_handle.await {
-                Ok(Ok(info)) => {
-                    tracing::info!(
-                        "Calibration complete: {:.2}s per segment at po2={}, {:.0} cycles/sec",
-                        info.seconds_per_segment,
-                        info.calibration_po2,
-                        info.cycles_per_sec,
-                    );
-                    *calibrate_state.calibration.write().await = Some(info.clone());
-                    if let Err(e) = save_calibration_cache(&cache_path, &info) {
-                        tracing::warn!(
-                            "Failed to persist calibration cache to {}: {}",
-                            cache_path.display(),
-                            e
-                        );
-                    } else {
-                        tracing::info!("Saved calibration cache to {}", cache_path.display());
-                    }
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!("Calibration failed (estimates will be unavailable): {}", e);
-                }
-                Err(e) => {
-                    tracing::warn!("Calibration task panicked: {}", e);
-                }
-            }
+        let calibrate_handle = tokio::task::spawn_blocking(move || {
+            let prover = Prover::new();
+            prover.calibrate()
         });
+        match calibrate_handle.await {
+            Ok(Ok(info)) => {
+                tracing::info!(
+                    "Calibration complete: {:.2}s per segment at po2={}, {:.0} cycles/sec",
+                    info.seconds_per_segment,
+                    info.calibration_po2,
+                    info.cycles_per_sec,
+                );
+                *calibrate_state.calibration.write().await = Some(info);
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("Calibration failed (estimates will be unavailable): {}", e);
+            }
+            Err(e) => {
+                tracing::warn!("Calibration task panicked: {}", e);
+            }
+        }
     }
 
     // Spawn the worker
@@ -238,23 +179,34 @@ pub async fn run_server(
         run_worker(worker_state, rx).await;
     });
 
-    // Build router.
-    //
-    // Layer ordering note: the last `.layer(...)` added runs first on the request.
-    // The auth layer is added before CORS/trace so that on the request path CORS runs
-    // first (handling preflight) and auth runs just before the handlers. The auth
-    // middleware also explicitly allows OPTIONS and GET /health through.
-    let app = Router::new()
+    // Optional bearer-token auth. If PROVER_AUTH_TOKEN is set, every route
+    // (including /health) requires `Authorization: Bearer <token>` — that
+    // way a successful /health probe also confirms auth is wired correctly.
+    let auth_token = std::env::var("PROVER_AUTH_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
+    if auth_token.is_some() {
+        tracing::info!("PROVER_AUTH_TOKEN set, requiring bearer auth on all routes");
+    }
+
+    let mut app = Router::new()
         .route("/health", get(health))
         .route("/prove", post(submit_prove))
         .route("/estimate", post(submit_estimate))
         .route("/compress", post(submit_compress))
         .route("/jobs/:job_id", get(get_job_status))
         .route("/jobs/:job_id/receipt", get(get_job_receipt))
-        .layer(middleware::from_fn_with_state(
-            state.clone(),
-            crate::auth::require_basic_auth,
-        ))
+        .route("/calibration", get(get_calibration))
+        .route("/jobs/:job_id/cancel", post(cancel_job));
+    if let Some(token) = auth_token {
+        app = app.layer(middleware::from_fn(move |req: Request, next: Next| {
+            let token = token.clone();
+            async move { bearer_auth(token, req, next).await }
+        }));
+    }
+
+    let app = app
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(TraceLayer::new_for_http())
         .layer(
             CorsLayer::new()
@@ -277,8 +229,99 @@ pub async fn run_server(
 }
 
 /// Health check endpoint
+/// POST /jobs/:job_id/cancel - Stop a job.
+///
+/// A queued job is dropped before it starts, which is the case that matters:
+/// it frees the worker for everything behind it.
+///
+/// A running job cannot be interrupted. risc0's `prove_session` proves the
+/// whole session in one call, and its per-segment hook returns `()`, so there
+/// is no cancellation point that does not involve unwinding through the
+/// prover — not worth the risk of leaving a CUDA context in a bad state to
+/// reclaim part of one proof. Such a job is marked cancelled, keeps running to
+/// completion, and has its receipt discarded. The GPU time is already spent;
+/// the honest way to reclaim it is to terminate the pod.
+async fn cancel_job(
+    State(state): State<Arc<ServerState>>,
+    Path(job_id): Path<String>,
+) -> impl IntoResponse {
+    let mut jobs = state.jobs.write().await;
+    let Some(job) = jobs.get_mut(&job_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Job not found".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    match job.status {
+        JobStatus::Complete | JobStatus::Failed | JobStatus::Cancelled => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: format!("job already {:?}", job.status),
+            }),
+        )
+            .into_response(),
+        JobStatus::Pending => {
+            job.cancel_requested = true;
+            job.status = JobStatus::Cancelled;
+            tracing::info!("Job {} cancelled before starting", job_id);
+            Json(serde_json::json!({ "cancelled": true, "was_running": false })).into_response()
+        }
+        JobStatus::Processing => {
+            job.cancel_requested = true;
+            tracing::info!("Job {} cancel requested while running", job_id);
+            Json(serde_json::json!({
+                "cancelled": true,
+                "was_running": true,
+                "note": "proof runs to completion; receipt discarded"
+            }))
+            .into_response()
+        }
+    }
+}
+
+/// GET /calibration - Measured proving throughput of this machine.
+///
+/// The number that characterises a GPU for cost purposes: cost per proof is
+/// total_proving_cycles / cycles_per_sec. Previously only reachable by reading
+/// the startup log line or running `subs-prover bench` on the box.
+///
+/// 503 when calibration was skipped or failed.
+async fn get_calibration(State(state): State<Arc<ServerState>>) -> impl IntoResponse {
+    match state.calibration.read().await.clone() {
+        Some(info) => Json(serde_json::json!({
+            "seconds_per_segment": info.seconds_per_segment,
+            "calibration_po2": info.calibration_po2,
+            "cycles_per_sec": info.cycles_per_sec,
+        }))
+        .into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "calibration unavailable (skipped or failed)",
+        )
+            .into_response(),
+    }
+}
+
 async fn health() -> &'static str {
     "ok"
+}
+
+/// Bearer-token middleware. Compares against the configured token in
+/// constant time-ish. Used only for the protected route group.
+async fn bearer_auth(expected: String, req: Request, next: Next) -> Response {
+    let presented = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "));
+    match presented {
+        Some(t) if t == expected => next.run(req).await,
+        _ => (StatusCode::UNAUTHORIZED, "missing or bad bearer token").into_response(),
+    }
 }
 
 /// Submit a proving request (binary borsh-encoded ProvingRequest)
@@ -314,6 +357,8 @@ async fn submit_prove(
         request: JobRequest::Prove(request),
         receipt: None,
         error: None,
+        progress: None,
+        cancel_requested: false,
     };
 
     // Add to queue
@@ -413,6 +458,8 @@ async fn submit_compress(
         request: JobRequest::Compress(input),
         receipt: None,
         error: None,
+        progress: None,
+        cancel_requested: false,
     };
 
     // Add to queue
@@ -453,6 +500,7 @@ async fn get_job_status(
                 job_type: job.job_type.clone(),
                 status: job.status.clone(),
                 error: job.error.clone(),
+                progress: job.progress.as_ref().map(|p| p.snapshot()),
             }),
         )
             .into_response(),
@@ -506,10 +554,7 @@ async fn get_job_receipt(
                 tracing::info!("Job {} receipt pulled, removing job", job_id);
                 (
                     StatusCode::OK,
-                    [(
-                        axum::http::header::CONTENT_TYPE,
-                        "application/octet-stream",
-                    )],
+                    [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
                     receipt,
                 )
                     .into_response()
@@ -543,6 +588,11 @@ async fn run_worker(state: Arc<ServerState>, mut rx: mpsc::Receiver<String>) {
         let job_request = {
             let mut jobs = state.jobs.write().await;
             match jobs.get_mut(&job_id) {
+                // Cancelled while queued: never start it.
+                Some(job) if job.cancel_requested => {
+                    tracing::info!("Skipping cancelled job {}", job_id);
+                    None
+                }
                 Some(job) => {
                     job.status = JobStatus::Processing;
                     Some(job.request.clone())
@@ -565,7 +615,18 @@ async fn run_worker(state: Arc<ServerState>, mut rx: mpsc::Receiver<String>) {
             JobRequest::Prove(req) => {
                 let idx = req.idx();
                 tracing::info!("[#{}] Starting proof...", idx);
-                prover.prove(req)
+
+                // Publish the sink before proving so the status endpoint can
+                // read counters as segments land, rather than only once the
+                // receipt exists.
+                let sink = ProgressSink::new();
+                {
+                    let mut jobs = state.jobs.write().await;
+                    if let Some(job) = jobs.get_mut(&job_id) {
+                        job.progress = Some(sink.clone());
+                    }
+                }
+                prover.prove_with_progress(req, Some(sink))
             }
             JobRequest::Compress(input) => {
                 tracing::info!("Starting SNARK compression...");
@@ -577,11 +638,35 @@ async fn run_worker(state: Arc<ServerState>, mut rx: mpsc::Receiver<String>) {
         {
             let mut jobs = state.jobs.write().await;
             if let Some(job) = jobs.get_mut(&job_id) {
+                // Stop the progress clock before recording the outcome, so a
+                // finished job reports how long it took rather than how long
+                // ago it started.
+                if let Some(sink) = &job.progress {
+                    sink.finish();
+                }
                 match result {
+                    // Cancelled mid-proof: the work finished, but the caller no
+                    // longer wants it, so the receipt is dropped rather than
+                    // stored.
+                    Ok(receipt) if job.cancel_requested => {
+                        tracing::info!(
+                            "Job {} finished but was cancelled; discarding {} byte receipt",
+                            job_id,
+                            receipt.len()
+                        );
+                        job.status = JobStatus::Cancelled;
+                    }
                     Ok(receipt) => {
                         tracing::info!("Job {} complete ({} bytes)", job_id, receipt.len());
                         job.status = JobStatus::Complete;
                         job.receipt = Some(receipt);
+                    }
+                    // A cancelled job that then errored is still cancelled: the
+                    // caller asked for it to stop and does not want the failure
+                    // of work they abandoned reported back as a fault.
+                    Err(e) if job.cancel_requested => {
+                        tracing::info!("Job {} cancelled; it ended with: {}", job_id, e);
+                        job.status = JobStatus::Cancelled;
                     }
                     Err(e) => {
                         tracing::error!("Job {} failed: {}", job_id, e);

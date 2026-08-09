@@ -21,7 +21,7 @@ use serde::Serialize;
 use spacedb::db::Database;
 use spacedb::subtree::SubTree;
 use spacedb::tx::{ProofType, ReadTransaction};
-use spacedb::{Hash, NodeHasher, Sha256Hasher};
+use spacedb::{Configuration, Hash, NodeHasher, Sha256Hasher};
 use spaces_protocol::slabel::SLabel;
 pub use subs_types::{CompressInput, ProvingRequest};
 use tokio::task::spawn_blocking;
@@ -66,6 +66,20 @@ impl SkipReason {
             SkipReason::AlreadyStagedDifferentSpk => "already staged with different spk",
             SkipReason::AlreadyCommitted => "already committed",
             SkipReason::AlreadyStaged => "already staged",
+        }
+    }
+
+    /// Stable token reported to a registry in the ack body.
+    ///
+    /// Separate from `as_str`, which is prose for logs and can be reworded
+    /// freely. These are a protocol contract: a registry matches on them to
+    /// decide what to tell a user, so they must not change once published.
+    pub fn as_outcome(&self) -> &'static str {
+        match self {
+            SkipReason::AlreadyCommittedDifferentSpk => "already_committed_different_spk",
+            SkipReason::AlreadyStagedDifferentSpk => "already_staged_different_spk",
+            SkipReason::AlreadyCommitted => "already_committed_same_spk",
+            SkipReason::AlreadyStaged => "already_staged_same_spk",
         }
     }
 }
@@ -202,7 +216,28 @@ impl LocalSpace {
         }
 
         let db_path = dir.join(format!("{}.sdb", name));
-        let db = spawn_blocking(move || Database::open(db_path.to_str().unwrap())).await??;
+        let config = Configuration::standard()
+            .with_auto_hash_index(true);
+
+        // Index building is idempotent — it fingerprints the root and skips a
+        // valid existing index — so this is only expensive the first time a
+        // space is opened after the feature is enabled. It runs on the
+        // blocking pool with the open because indexing every snapshot of a
+        // large tree is real CPU and I/O, not something to do on the runtime.
+        //
+        // A failure is logged rather than propagated: the index is an
+        // optimisation, and a space that cannot be indexed must still open.
+        let db = spawn_blocking(move || -> anyhow::Result<_> {
+            let db = Database::open_with_config(db_path.to_str().unwrap(), config)?;
+            for snap in db.iter() {
+                match snap.and_then(|mut s| s.build_hash_index()) {
+                    Ok(()) => {}
+                    Err(e) => log::warn!("could not build hash index: {} (proofs will be slower)", e),
+                }
+            }
+            Ok(db)
+        })
+        .await??;
 
         Ok(Self {
             name,
@@ -996,7 +1031,16 @@ impl LocalSpace {
         commitment_id: i64,
         estimate_json: &str,
     ) -> anyhow::Result<()> {
-        self.storage.update_commitment_estimate(commitment_id, estimate_json).await
+        self.storage
+            .update_commitment_estimate(commitment_id, Some(estimate_json))
+            .await
+    }
+
+    /// Drop the stored estimate once the proof it described has finished.
+    pub async fn clear_estimate(&self, commitment_id: i64) -> anyhow::Result<()> {
+        self.storage
+            .update_commitment_estimate(commitment_id, None)
+            .await
     }
 }
 
@@ -1059,6 +1103,8 @@ mod tests {
 
         let zk_input = batch.to_zk_input();
 
+        // Two fields per entry: [sha256(subspace label)][sha256(HandleOut)].
+        // The leading space hash of the old three-field layout is gone.
         let subspace_hash = Sha256Hasher::hash(label.as_slabel().as_ref());
         assert_eq!(&zk_input[0..32], &subspace_hash);
 
@@ -1069,6 +1115,7 @@ mod tests {
         let value_hash = Sha256Hasher::hash(&handle_out.to_vec());
         assert_eq!(&zk_input[32..64], &value_hash);
 
+        // 32 (subspace) + 32 (value) per entry
         assert_eq!(zk_input.len(), 64);
     }
 
@@ -1399,6 +1446,7 @@ fn get_snapshot_for_tip(db: &Database<Sha256Hasher>, tip: [u8;32]) -> anyhow::Re
     }
     Err(anyhow!("no snapshot for {}", hex::encode(&tip)))
 }
+
 
 fn rollback_local_commitment(db: &Database<Sha256Hasher>, root: [u8; 32]) -> anyhow::Result<()> {
     let mut found = false;

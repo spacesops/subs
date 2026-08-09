@@ -16,6 +16,9 @@ services:
       SUBS_PROVER_SERVER: "1"
       SUBS_PROVER_PORT: "8888"
       REGISTRY_SERVER_PORT: "8081"
+      # Required by registry-server (set real values in .env for compose).
+      REGISTRY_API_KEY: ${REGISTRY_API_KEY:-change-me-intake}
+      SUBSD_API_KEY: ${SUBSD_API_KEY:-change-me-subsd}
       RUST_LOG: subs=info,subs_prover=info,registry_server=info,tower_http=debug
     volumes:
       - subs-data:/data
@@ -55,6 +58,8 @@ services:
       SUBS_START_PROVER: "0"
       SUBS_START_REGISTRY: "0"
       REGISTRY_SERVER_PORT: "8081"
+      REGISTRY_API_KEY: ${REGISTRY_API_KEY:-change-me-intake}
+      SUBSD_API_KEY: ${SUBSD_API_KEY:-change-me-subsd}
       RUST_LOG: registry_server=info,tower_http=debug
     ports:
       - "${REGISTRY_SERVER_PORT:-8081}:8081"
