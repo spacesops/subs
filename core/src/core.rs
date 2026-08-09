@@ -1058,17 +1058,18 @@ mod tests {
         });
 
         let zk_input = batch.to_zk_input();
-        
-        // Next 32 bytes should be sha256(subspace label)
+
         let subspace_hash = Sha256Hasher::hash(label.as_slabel().as_ref());
-        assert_eq!(&zk_input[32..64], &subspace_hash);
+        assert_eq!(&zk_input[0..32], &subspace_hash);
 
-        // Next 32 bytes should be sha256(script_pubkey)
-        let spk_hash = Sha256Hasher::hash(spk.as_bytes());
-        assert_eq!(&zk_input[64..96], &spk_hash);
+        let handle_out = HandleOut {
+            name: label.as_slabel().clone(),
+            spk: spk.clone(),
+        };
+        let value_hash = Sha256Hasher::hash(&handle_out.to_vec());
+        assert_eq!(&zk_input[32..64], &value_hash);
 
-        // Total size: 32 (space) + 32 (subspace) + 32 (spk) = 96 bytes
-        assert_eq!(zk_input.len(), 96);
+        assert_eq!(zk_input.len(), 64);
     }
 
     #[test]
