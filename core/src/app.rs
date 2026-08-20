@@ -9,7 +9,6 @@ use std::sync::{Arc, Mutex};
 use crate::core::{
     CompressInput, HealthWarning, LocalSpace, ProvingRequest, SkippedEntry, SpaceStatus,
 };
-use crate::storage::Handle;
 use crate::HandleRequest;
 use anyhow::anyhow;
 use bitcoin::hashes::{sha256, Hash as BitcoinHash};
