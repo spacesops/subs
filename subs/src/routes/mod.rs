@@ -73,6 +73,7 @@ pub fn router() -> Router<AppState> {
         .route("/query/anchors", get(query::export_anchors))
         // API: Certificates
         .route("/certs/:handle", get(certs::issue_cert))
+        .route("/certs/:handle/message", get(certs::export_message))
         // API: RPC Console
         .route("/rpc/endpoints", get(console::get_endpoints))
         .route("/rpc/spaced", post(console::proxy_spaced))

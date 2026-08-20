@@ -221,6 +221,11 @@ impl TestRigHandle {
             self.spaced_rpc_url.replace("://", "://user:pass@"),
             "--port".to_string(),
             port.to_string(),
+            // Reachable off-box, matching the subs listener. certrelay binds
+            // loopback by default, which leaves it unusable from another
+            // machine or a container.
+            "--bind".to_string(),
+            "0.0.0.0".to_string(),
             "--self-url".to_string(),
             url.clone(),
             "--is-bootstrap".to_string(),
