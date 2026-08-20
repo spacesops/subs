@@ -17,3 +17,6 @@ datamadd/
 NOTES.md
 .cargo/
 subspaces.tar
+
+subs-*
+data_*
