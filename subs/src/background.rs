@@ -104,7 +104,7 @@ async fn registry_loop(state: AppState) {
 
             match state
                 .operator
-                .publish_certs(space, PUBLISH_BATCH_SIZE, &[], state.publish_require_finalized)
+                .publish_certs(space, PUBLISH_BATCH_SIZE, &[])
                 .await
             {
                 Ok((0, 0)) => {}

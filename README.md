@@ -77,7 +77,6 @@ See [.env.example](.env.example) for a full template.
 | `SUBS_PROVER_ENDPOINT` | *(Settings UI)* | Prover URL written to `config.db` at startup |
 | `SUBS_REGISTRY_ENDPOINT` | *(Settings UI)* | Registry URL written to `config.db` at startup |
 | `SUBS_BASIC_AUTH_USER` / `SUBS_BASIC_AUTH_PASSWORD` | `--basic-auth-user` / `--basic-auth-password` | Optional HTTP Basic for UI/API (both required; `/health` stays anonymous) |
-| `SUBS_PUBLISH_REQUIRE_FINALIZED` | `--publish-require-finalized` | Block publish until commitments have 150 confirmations |
 | `SUBS_TEST_RIG` | `--test-rig` | Enable test rig (`1`, `true`, `yes`) |
 | `SUBS_TEST_RIG_DIR` | `--test-rig-dir` | Test rig data directory |
 

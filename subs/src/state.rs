@@ -25,8 +25,6 @@ pub struct AppState {
     pub spaced_rpc_cookie: Option<PathBuf>,
     /// HTTP Basic auth credentials (user, password); auth is enforced when Some
     pub basic_auth: Option<(String, String)>,
-    /// When true, publish is blocked until commitments reach 150 on-chain confirmations.
-    pub publish_require_finalized: bool,
     /// Bitcoin RPC URL (only available in test-rig mode)
     pub bitcoin_rpc_url: Option<String>,
     /// Certrelay URL (only available in test-rig mode)
@@ -47,7 +45,6 @@ impl AppState {
         spaced_rpc_password: Option<String>,
         spaced_rpc_cookie: Option<PathBuf>,
         basic_auth: Option<(String, String)>,
-        publish_require_finalized: bool,
         _bitcoin_rpc_url: Option<String>,
     ) -> Self {
         Self {
@@ -58,7 +55,6 @@ impl AppState {
             spaced_rpc_password,
             spaced_rpc_cookie,
             basic_auth,
-            publish_require_finalized,
             bitcoin_rpc_url: None,
             certrelay_url: None,
         }
@@ -74,7 +70,6 @@ impl AppState {
         spaced_rpc_password: Option<String>,
         spaced_rpc_cookie: Option<PathBuf>,
         basic_auth: Option<(String, String)>,
-        publish_require_finalized: bool,
         bitcoin_rpc_url: Option<String>,
     ) -> Self {
         Self {
@@ -85,7 +80,6 @@ impl AppState {
             spaced_rpc_password,
             spaced_rpc_cookie,
             basic_auth,
-            publish_require_finalized,
             bitcoin_rpc_url,
             certrelay_url: None,
             test_rig: None,
@@ -102,7 +96,6 @@ impl AppState {
         spaced_rpc_password: Option<String>,
         spaced_rpc_cookie: Option<PathBuf>,
         basic_auth: Option<(String, String)>,
-        publish_require_finalized: bool,
         bitcoin_rpc_url: Option<String>,
         certrelay_url: Option<String>,
         test_rig: Arc<TestRigHandle>,
@@ -115,7 +108,6 @@ impl AppState {
             spaced_rpc_password,
             spaced_rpc_cookie,
             basic_auth,
-            publish_require_finalized,
             bitcoin_rpc_url,
             certrelay_url,
             test_rig: Some(test_rig),

@@ -79,11 +79,6 @@ struct Cli {
     #[arg(long, env = "SUBS_BASIC_AUTH_PASSWORD")]
     basic_auth_password: Option<String>,
 
-    /// Block certificate publish until commitments are finalized (150 confirmations).
-    /// When unset, defaults to false. Set env `SUBS_PUBLISH_REQUIRE_FINALIZED=1` to enable.
-    #[arg(long, default_value_t = false)]
-    publish_require_finalized: bool,
-
     /// Enable test rig mode (starts bitcoind + spaced automatically)
     #[cfg(feature = "test-rig")]
     #[arg(long, env = "SUBS_TEST_RIG")]
@@ -112,8 +107,6 @@ async fn main() -> Result<()> {
 
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
-    let publish_require_finalized =
-        env::resolve_publish_require_finalized(&matches, cli.publish_require_finalized);
     env::log_startup(
         &matches,
         &dotenv,
@@ -127,7 +120,6 @@ async fn main() -> Result<()> {
             rpc_cookie: cli.rpc_cookie.as_deref(),
             basic_auth_user: cli.basic_auth_user.as_deref(),
             basic_auth_password: cli.basic_auth_password.as_deref(),
-            publish_require_finalized,
             #[cfg(feature = "test-rig")]
             test_rig: cli.test_rig,
             #[cfg(feature = "test-rig")]
@@ -138,23 +130,23 @@ async fn main() -> Result<()> {
     #[cfg(feature = "test-rig")]
     {
         if cli.test_rig {
-            let mut handle = run_with_test_rig(cli, publish_require_finalized).await?;
+            let mut handle = run_with_test_rig(cli).await?;
             // Gracefully stop bitcoind so it flushes blocks to disk
             if let Err(e) = handle.stop().await {
                 tracing::warn!("Failed to stop bitcoind cleanly: {}", e);
             }
         } else {
-            run_normal(cli, publish_require_finalized).await?;
+            run_normal(cli).await?;
         }
     }
 
     #[cfg(not(feature = "test-rig"))]
-    run_normal(cli, publish_require_finalized).await?;
+    run_normal(cli).await?;
 
     Ok(())
 }
 
-async fn run_normal(cli: Cli, publish_require_finalized: bool) -> Result<()> {
+async fn run_normal(cli: Cli) -> Result<()> {
     use spaces_client::rpc::RpcClient;
 
     let rpc_url = cli.rpc_url.as_ref().expect("rpc_url required");
@@ -209,14 +201,13 @@ async fn run_normal(cli: Cli, publish_require_finalized: bool) -> Result<()> {
         cli.rpc_password.clone(),
         cli.rpc_cookie.clone(),
         basic_auth,
-        publish_require_finalized,
         None,
     )
     .await
 }
 
 #[cfg(feature = "test-rig")]
-async fn run_with_test_rig(cli: Cli, publish_require_finalized: bool) -> Result<testrig::TestRigHandle> {
+async fn run_with_test_rig(cli: Cli) -> Result<testrig::TestRigHandle> {
     use std::sync::Arc;
     use crate::testrig::TestRigHandle;
 
@@ -277,7 +268,7 @@ async fn run_with_test_rig(cli: Cli, publish_require_finalized: bool) -> Result<
     // Run server (this blocks until shutdown)
     let spaced_url = handle.spaced_rpc_url().to_string();
     let bitcoin_url = handle.bitcoin_rpc_url().to_string();
-    run_server_with_testrig(operator, config, cli.port, spaced_url, bitcoin_url, certrelay_url, basic_auth, publish_require_finalized, handle.clone()).await?;
+    run_server_with_testrig(operator, config, cli.port, spaced_url, bitcoin_url, certrelay_url, basic_auth, handle.clone()).await?;
 
     // Background tasks (proving loop) hold AppState clones with Arc refs.
     // On shutdown just leak them; the process is exiting anyway.
@@ -300,7 +291,6 @@ async fn run_server(
     spaced_rpc_password: Option<String>,
     spaced_rpc_cookie: Option<PathBuf>,
     basic_auth: Option<(String, String)>,
-    publish_require_finalized: bool,
     bitcoin_rpc_url: Option<String>,
 ) -> Result<()> {
     // Build app state
@@ -312,7 +302,6 @@ async fn run_server(
         spaced_rpc_password,
         spaced_rpc_cookie,
         basic_auth,
-        publish_require_finalized,
         bitcoin_rpc_url,
     );
     run_server_inner(state, port).await
@@ -328,7 +317,6 @@ async fn run_server_with_testrig(
     bitcoin_rpc_url: String,
     certrelay_url: String,
     basic_auth: Option<(String, String)>,
-    publish_require_finalized: bool,
     test_rig: std::sync::Arc<testrig::TestRigHandle>,
 ) -> Result<()> {
     // Build app state with test rig
@@ -340,7 +328,6 @@ async fn run_server_with_testrig(
         Some("pass".to_string()),
         None,
         basic_auth,
-        publish_require_finalized,
         Some(bitcoin_rpc_url),
         Some(certrelay_url),
         test_rig,

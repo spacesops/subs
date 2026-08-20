@@ -260,27 +260,9 @@ pub async fn publish_certs(
 
     let (count, remaining) = state
         .operator
-        .publish_certs(
-            &space,
-            PUBLISH_BATCH_SIZE,
-            &handles,
-            state.publish_require_finalized,
-        )
+        .publish_certs(&space, PUBLISH_BATCH_SIZE, &handles)
         .await
-        .map_err(|e| {
-            let msg = e.to_string();
-            if state.publish_require_finalized
-                && (msg.contains("confirmations")
-                    || msg.contains("not broadcast")
-                    || msg.contains("not confirmed")
-                    || msg.contains("not committed")
-                    || msg.contains("RPC required"))
-            {
-                json_error(StatusCode::CONFLICT, msg)
-            } else {
-                json_error(StatusCode::INTERNAL_SERVER_ERROR, msg)
-            }
-        })?;
+        .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(PublishResponse {
         handles_published: count,
@@ -390,12 +372,6 @@ pub struct PipelineResponse {
     pub prover_configured: bool,
     /// Whether a proving job is currently in flight on the prover
     pub proving_job_active: bool,
-    /// When true, publish is blocked until commitments reach 150 confirmations.
-    pub publish_require_finalized: bool,
-    /// Whether publishing is currently allowed for unpublished handles.
-    pub publish_allowed: bool,
-    /// Reason publish is blocked, when `publish_require_finalized` is enabled.
-    pub publish_blocked_reason: Option<String>,
     /// Which proof of the commitment is next (1-based), when proving.
     pub proof_index: Option<usize>,
     /// How many proofs this commitment needs in total: the first commitment
@@ -464,20 +440,6 @@ pub async fn get_pipeline_status(
         false
     };
 
-    let publish_require_finalized = state.publish_require_finalized;
-    let (publish_allowed, publish_blocked_reason) = if !publish_require_finalized || status.unpublished == 0 {
-        (true, None)
-    } else {
-        match state
-            .operator
-            .publish_gate(&space_label, publish_require_finalized, PUBLISH_BATCH_SIZE)
-            .await
-        {
-            Ok((allowed, reason)) => (allowed, reason),
-            Err(e) => (false, Some(e.to_string())),
-        }
-    };
-
     // Ask the prover how far along it is. Only the prover knows, and the value
     // is stale the moment it is cached, so it is fetched per request rather
     // than stored. Failures are swallowed: a missing progress bar is a much
@@ -491,9 +453,6 @@ pub async fn get_pipeline_status(
         status,
         prover_configured,
         proving_job_active,
-        publish_require_finalized,
-        publish_allowed,
-        publish_blocked_reason,
         proof_index,
         proof_total,
         proving_job_id: active_job_id,

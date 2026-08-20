@@ -169,17 +169,6 @@ Handles marked **parked** are excluded from the next `commit_local`. Unpark them
 
 ---
 
-## Optional: block publish until finalized
-
-Set `SUBS_PUBLISH_REQUIRE_FINALIZED=1` (or `--publish-require-finalized`) to enforce stricter publish gating:
-
-- **Off (default):** original behavior — publish is available whenever handles are unpublished.
-- **On:** publish is blocked in the UI and API until each handle's commitment has **150 on-chain confirmations** (pipeline **Finalized** step).
-
-When blocked, the space page publish button is disabled with a tooltip explaining why. The API returns `409 Conflict` with the same message.
-
----
-
 ## Related docs
 
 | Topic | File |

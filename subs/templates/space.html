@@ -308,7 +308,7 @@ async function refreshPipeline() {
         const msg = $('pipelineMessage');
         const actions = $('pipelineActions');
 
-        updatePublishBar(j);
+        updatePublishBar(j.unpublished || 0);
 
         // Re-arm before the has_pending branch below: publishing no longer
         // sets has_pending, so that branch returns early and would otherwise
@@ -565,46 +565,16 @@ function renderActions(r) {
     el.innerHTML = h;
 }
 
-function canPublish(pipeline) {
-    if (!pipeline || !(pipeline.unpublished > 0)) return false;
-    if (!pipeline.publish_require_finalized) return true;
-    return pipeline.publish_allowed !== false;
-}
-
-/** Human-readable reason publish is blocked, including remaining confirmations when known. */
-function publishBlockedReason(pipeline) {
-    if (!pipeline) {
-        return 'Publishing is blocked until the commitment has 150 confirmations';
-    }
-    if (pipeline.publish_blocked_reason) return pipeline.publish_blocked_reason;
-    const m = String(pipeline.message || '').match(/^(\d+)\/(\d+)\s+confirmations$/);
-    if (m) {
-        const cur = parseInt(m[1], 10);
-        const max = parseInt(m[2], 10);
-        const remaining = Math.max(0, max - cur);
-        return `Publishing is blocked until finalization: ${cur}/${max} confirmations (${remaining} more needed)`;
-    }
-    return 'Publishing is blocked until the commitment has 150 confirmations';
-}
-
-function updatePublishBar(pipeline) {
+function updatePublishBar(n) {
     const bar = $('publishBar');
-    const n = pipeline?.unpublished || 0;
-    if (n <= 0) {
+    if (n > 0) {
+        const batch = Math.min(n, 100);
+        const label = batch < n ? `${batch}/${n}` : `${n}`;
+        bar.innerHTML = `⊕ Publish <span class="count">${label}</span>`;
+        bar.classList.remove('hidden');
+    } else {
         bar.classList.add('hidden');
-        bar.disabled = false;
-        bar.title = '';
-        return;
     }
-
-    const batch = Math.min(n, 100);
-    const label = batch < n ? `${batch}/${n}` : `${n}`;
-    bar.innerHTML = `⊕ Publish <span class="count">${label}</span>`;
-    bar.classList.remove('hidden');
-
-    const allowed = canPublish(pipeline);
-    bar.disabled = !allowed;
-    bar.title = allowed ? '' : publishBlockedReason(pipeline);
 }
 
 // ---------------------------------------------------------------------------
@@ -678,10 +648,6 @@ async function rollbackLocal() {
 }
 
 async function publishCerts() {
-    if (currentPipeline && !canPublish(currentPipeline)) {
-        logAction(`Error: ${publishBlockedReason(currentPipeline)}`);
-        return;
-    }
     logAction('Publishing certificates...');
     try {
         const { ok, data } = await api(`${spaceUrl}/publish`, { method: 'POST' });
@@ -1014,10 +980,7 @@ function updateBulkBar() {
         else                  h += btn('Park', 'park') + btn('Unpark', 'unpark');
         h += btn('Remove', 'remove');
     }
-    const publishAllowed = !currentPipeline?.publish_require_finalized || currentPipeline?.publish_allowed !== false;
-    if (publishAllowed) {
-        h += btn(allPublished && !nonePublished ? 'Republish' : 'Publish', 'publish');
-    }
+    h += btn(allPublished && !nonePublished ? 'Republish' : 'Publish', 'publish');
     btns.innerHTML = h;
 }
 
@@ -1036,10 +999,6 @@ function getSelectionContext() {
 }
 
 async function bulkAction(action) {
-    if (action === 'publish' && currentPipeline && !canPublish(currentPipeline)) {
-        logAction(`Error: ${publishBlockedReason(currentPipeline)}`);
-        return;
-    }
     if (action === 'remove') {
         const count = selectAllMode ? lastTotal : selectedHandles.size;
         if (!confirm(`Remove ${count} staged handle(s)? This cannot be undone.`)) return;

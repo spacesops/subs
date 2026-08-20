@@ -190,7 +190,7 @@ curl -s "http://127.0.0.1:7777/spaces/%40swifty/pipeline"
 curl -s "http://127.0.0.1:7777/spaces/%40swifty/commit/status"
 ```
 
-Pipeline moves to **Confirmed** (mined) then **Finalized** (≥ 150 confirmations). The UI treats **Finalized** as “ready to publish certificates,” but the critical requirement is that the **on-chain tip root matches** your commitment (Confirmed), not necessarily all 150 blocks—though waiting for **Finalized** is recommended.
+Pipeline moves to **Confirmed** (mined) then **Finalized** (≥ 150 confirmations). Publish is available once handles are unpublished and the on-chain tip is usable — **Confirmed** is enough. Waiting for **Finalized** is only required before the next local commit can start.
 
 ---
 
@@ -336,4 +336,4 @@ Use registry when external parties register handles; otherwise stage via `/reque
 | Publish | `POST /spaces/:space/publish` → `Operator::publish_certs` → `submit_certs` |
 | Resolve | `POST /query` → `Operator::resolve` |
 
-Pipeline step logic (150 confirmations, publish readiness): `Operator::get_pipeline_status` in `core/src/app.rs`.
+Pipeline step logic (150 confirmations for next-commit readiness): `Operator::get_pipeline_status` in `core/src/app.rs`.
