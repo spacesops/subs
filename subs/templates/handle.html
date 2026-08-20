@@ -156,6 +156,7 @@ function renderActions(h) {
     const pubLabel = h.publish_status ? 'Re-publish Certificate' : 'Publish Certificate';
     btns += `<button onclick="publishCert()" class="btn-secondary">${pubLabel}</button>`;
     btns += `<button onclick="downloadCert()" class="btn-secondary">Download Certificates</button>`;
+    btns += `<button onclick="downloadMessage()" class="btn-secondary" title="The exact bytes publishing this handle would broadcast">Download Message</button>`;
     btns += `<button onclick="queryHandle()" class="btn-secondary">Query Fabric</button>`;
     actions.innerHTML = btns;
 }
@@ -236,6 +237,31 @@ async function downloadCert() {
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
         showResult('Certificate downloaded', true);
+    } catch (e) {
+        showResult(e.message, false);
+    }
+}
+
+// The exact bytes publishing this handle would broadcast. Downloaded rather
+// than shown: it is binary, and the root certificate alone is ~224 KB.
+async function downloadMessage() {
+    try {
+        const r = await fetch(`/certs/${encodeURIComponent(fullHandle)}/message`);
+        if (!r.ok) {
+            const j = await r.json().catch(() => ({}));
+            showResult(j.error || 'Failed to build message', false);
+            return;
+        }
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${handle}${space}.message.bin`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showResult(`Message downloaded (${blob.size.toLocaleString()} bytes)`, true);
     } catch (e) {
         showResult(e.message, false);
     }
