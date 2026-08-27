@@ -27,10 +27,10 @@ relay = { git = "https://github.com/spacesprotocol/certrelay.git" }
 fabric = { package = "fabric-resolver", version = "=0.2.9" }
 
 # Spaces protocol crates
-spaces_protocol = { version = "0.3.0", features = ["std"] }
-spaces_nums = { version = "0.3.0", features = ["std"] }
-spaces_client = { version = "0.3.0" }
-spaces_wallet = "0.3.0"
+spaces_protocol = { version = "0.3.1", features = ["std"] }
+spaces_nums = { version = "0.3.1", features = ["std"] }
+spaces_client = { version = "0.3.1" }
+spaces_wallet = "0.3.1"
 spaces_testutil = { git = "https://github.com/spacesprotocol/spaces.git", branch = "subspaces" }
 
 # Common third-party deps

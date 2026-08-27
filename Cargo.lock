@@ -1275,9 +1275,9 @@ dependencies = [
 
 [[package]]
 name = "borsh_utils"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afe6e88b898c9baea16d8f01a67b948c3816e48e96f779afd4a7932b03d1cac1"
+checksum = "e29ef1b6be4d5dc270b1e814cfbf237851fefc46368c2304813664df43307ea7"
 dependencies = [
  "bitcoin",
  "borsh",
@@ -1285,8 +1285,8 @@ dependencies = [
 
 [[package]]
 name = "borsh_utils"
-version = "0.3.0"
-source = "git+https://github.com/spacesprotocol/spaces.git?branch=subspaces#5eedbb096aca38127b0d02f85e58ccee24c9bbd5"
+version = "0.3.1"
+source = "git+https://github.com/spacesprotocol/spaces.git?branch=subspaces#dd86e0763d2f36c0fd4935931b0d1f25770be773"
 dependencies = [
  "bitcoin",
  "borsh",
@@ -2307,7 +2307,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "spaces_nums 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_nums 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio",
 ]
 
@@ -2323,7 +2323,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "spaces_nums 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_nums 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -3648,10 +3648,10 @@ dependencies = [
  "risc0-zkvm",
  "serde",
  "serde_json",
- "sip7 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sip7 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "spacedb",
- "spaces_nums 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "spaces_protocol 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_nums 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_protocol 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
@@ -4956,9 +4956,9 @@ dependencies = [
  "sha2",
  "spacedb",
  "spaces_checkpoint",
- "spaces_client 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "spaces_nums 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "spaces_protocol 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_client 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_nums 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_protocol 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio",
  "toml",
  "tower-http",
@@ -6030,25 +6030,25 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "sip7"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1c60c754d3958120c272c963e2333f4ea2f142f9832e5ffdd4cc04caa9ab946"
+checksum = "69ce631ff60b838e2a8db3642890ddb1e58df700bf6e6b20b0c9cbb3d309204e"
 dependencies = [
  "base64 0.22.1",
  "hex",
  "serde",
- "spaces_protocol 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_protocol 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "sip7"
-version = "0.3.0"
-source = "git+https://github.com/spacesprotocol/spaces.git?branch=subspaces#5eedbb096aca38127b0d02f85e58ccee24c9bbd5"
+version = "0.3.1"
+source = "git+https://github.com/spacesprotocol/spaces.git?branch=subspaces#dd86e0763d2f36c0fd4935931b0d1f25770be773"
 dependencies = [
  "base64 0.22.1",
  "hex",
  "serde",
- "spaces_protocol 0.3.0 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
+ "spaces_protocol 0.3.1 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
 ]
 
 [[package]]
@@ -6127,7 +6127,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "spacedb",
- "spaces_protocol 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_protocol 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "tar",
  "tracing",
  "ureq",
@@ -6135,14 +6135,14 @@ dependencies = [
 
 [[package]]
 name = "spaces_client"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "534384e03c6d0bf1196466d9a7e20cebb1c5b425b926834a673439b214ce0815"
+checksum = "b0222ca334f6de09382f7418354937e14dfcb10ad367f404380e5d256ab5968a"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "borsh",
- "borsh_utils 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "borsh_utils 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "clap",
  "colored",
  "directories 5.0.1",
@@ -6158,11 +6158,11 @@ dependencies = [
  "schemars 0.8.22",
  "serde",
  "serde_json",
- "sip7 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "sip7 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "spacedb",
- "spaces_nums 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "spaces_protocol 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "spaces_wallet 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_nums 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_protocol 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_wallet 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "tabled",
  "threadpool",
  "tokio",
@@ -6171,13 +6171,13 @@ dependencies = [
 
 [[package]]
 name = "spaces_client"
-version = "0.3.0"
-source = "git+https://github.com/spacesprotocol/spaces.git?branch=subspaces#5eedbb096aca38127b0d02f85e58ccee24c9bbd5"
+version = "0.3.1"
+source = "git+https://github.com/spacesprotocol/spaces.git?branch=subspaces#dd86e0763d2f36c0fd4935931b0d1f25770be773"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "borsh",
- "borsh_utils 0.3.0 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
+ "borsh_utils 0.3.1 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
  "clap",
  "colored",
  "directories 5.0.1",
@@ -6192,11 +6192,11 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "sip7 0.3.0 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
+ "sip7 0.3.1 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
  "spacedb",
- "spaces_nums 0.3.0 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
- "spaces_protocol 0.3.0 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
- "spaces_wallet 0.3.0 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
+ "spaces_nums 0.3.1 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
+ "spaces_protocol 0.3.1 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
+ "spaces_wallet 0.3.1 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
  "tabled",
  "threadpool",
  "tokio",
@@ -6205,62 +6205,62 @@ dependencies = [
 
 [[package]]
 name = "spaces_nums"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7995b967a9e479b52f11e4b6f165f3b0c07b58f3aa109234332a2a9fdbab4716"
+checksum = "d729355e71bd4565e7042a5a8cbe202b9fe251b4b261dfe52afbd5ecddd658ea"
 dependencies = [
  "bech32",
  "bitcoin",
  "borsh",
- "borsh_utils 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "borsh_utils 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "hex",
  "log",
  "serde",
- "spaces_protocol 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_protocol 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "spaces_nums"
-version = "0.3.0"
-source = "git+https://github.com/spacesprotocol/spaces.git?branch=subspaces#5eedbb096aca38127b0d02f85e58ccee24c9bbd5"
+version = "0.3.1"
+source = "git+https://github.com/spacesprotocol/spaces.git?branch=subspaces#dd86e0763d2f36c0fd4935931b0d1f25770be773"
 dependencies = [
  "bech32",
  "bitcoin",
  "borsh",
- "borsh_utils 0.3.0 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
+ "borsh_utils 0.3.1 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
  "hex",
  "log",
  "serde",
- "spaces_protocol 0.3.0 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
+ "spaces_protocol 0.3.1 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
 ]
 
 [[package]]
 name = "spaces_protocol"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "592c235dc5872d4d28564fa59e0c4035255042a60d0c77f3732df527f4485100"
+checksum = "3a6deef9aaa8aab1737cc34fe53e5b67979369244eb0fe0d828c8d9aaff21cdc"
 dependencies = [
  "bitcoin",
  "borsh",
- "borsh_utils 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "borsh_utils 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
 ]
 
 [[package]]
 name = "spaces_protocol"
-version = "0.3.0"
-source = "git+https://github.com/spacesprotocol/spaces.git?branch=subspaces#5eedbb096aca38127b0d02f85e58ccee24c9bbd5"
+version = "0.3.1"
+source = "git+https://github.com/spacesprotocol/spaces.git?branch=subspaces#dd86e0763d2f36c0fd4935931b0d1f25770be773"
 dependencies = [
  "bitcoin",
  "borsh",
- "borsh_utils 0.3.0 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
+ "borsh_utils 0.3.1 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
  "serde",
 ]
 
 [[package]]
 name = "spaces_testutil"
-version = "0.3.0"
-source = "git+https://github.com/spacesprotocol/spaces.git?branch=subspaces#5eedbb096aca38127b0d02f85e58ccee24c9bbd5"
+version = "0.3.1"
+source = "git+https://github.com/spacesprotocol/spaces.git?branch=subspaces#dd86e0763d2f36c0fd4935931b0d1f25770be773"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -6269,17 +6269,17 @@ dependencies = [
  "hex",
  "serde_json",
  "spacedb",
- "spaces_client 0.3.0 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
- "spaces_protocol 0.3.0 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
+ "spaces_client 0.3.1 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
+ "spaces_protocol 0.3.1 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
  "tokio",
  "zip 0.6.6",
 ]
 
 [[package]]
 name = "spaces_wallet"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d340b0780e3246915db18f4a4b7f6a7aa96af429d75fb4bc622b31b7cb5e878"
+checksum = "08a14aa83a5bd3539e7cf7bbc7f9c56bdd649e33252cc46aa477fbce0689632c"
 dependencies = [
  "anyhow",
  "bdk_wallet_backport",
@@ -6289,14 +6289,14 @@ dependencies = [
  "secp256k1",
  "serde",
  "serde_json",
- "spaces_nums 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "spaces_protocol 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_nums 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_protocol 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
 name = "spaces_wallet"
-version = "0.3.0"
-source = "git+https://github.com/spacesprotocol/spaces.git?branch=subspaces#5eedbb096aca38127b0d02f85e58ccee24c9bbd5"
+version = "0.3.1"
+source = "git+https://github.com/spacesprotocol/spaces.git?branch=subspaces#dd86e0763d2f36c0fd4935931b0d1f25770be773"
 dependencies = [
  "anyhow",
  "bdk_wallet_backport",
@@ -6306,8 +6306,8 @@ dependencies = [
  "secp256k1",
  "serde",
  "serde_json",
- "spaces_nums 0.3.0 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
- "spaces_protocol 0.3.0 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
+ "spaces_nums 0.3.1 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
+ "spaces_protocol 0.3.1 (git+https://github.com/spacesprotocol/spaces.git?branch=subspaces)",
 ]
 
 [[package]]
@@ -6417,10 +6417,10 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "spaces_client 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "spaces_protocol 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_client 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_protocol 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "spaces_testutil",
- "spaces_wallet 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_wallet 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "subs-core",
  "subs-types",
  "tokio",
@@ -6447,11 +6447,11 @@ dependencies = [
  "serde",
  "serde_json",
  "spacedb",
- "spaces_client 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "spaces_nums 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "spaces_protocol 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_client 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_nums 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_protocol 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "spaces_testutil",
- "spaces_wallet 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_wallet 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "subs-prover",
  "subs-types",
  "tempfile",
@@ -6597,7 +6597,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
