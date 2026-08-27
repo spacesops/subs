@@ -8,6 +8,8 @@ members = [
     "subs",
     "examples/registry-server",
     "tools/wif-to-hex",
+    "tools/sdb-root",
+    "tools/adopt-subspacer",
 ]
 
 [workspace.dependencies]

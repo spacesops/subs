@@ -45,6 +45,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "adopt-subspacer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "hex",
+ "serde",
+ "serde_json",
+ "spacedb",
+ "spaces_client 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "spaces_protocol 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "subs-core",
+ "tokio",
+]
+
+[[package]]
 name = "aes"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5754,6 +5771,16 @@ checksum = "da046153aa2352493d6cb7da4b6e5c0c057d8a1d0a9aa8560baffdd945acd414"
 dependencies = [
  "ring",
  "untrusted",
+]
+
+[[package]]
+name = "sdb-root"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "spacedb",
 ]
 
 [[package]]

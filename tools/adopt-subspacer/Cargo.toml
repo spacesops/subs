@@ -1,0 +1,22 @@
+[package]
+name = "adopt-subspacer"
+version = "0.1.0"
+edition = "2021"
+description = "Adopt a legacy subspacer space directory into subs SUBS_DATA_DIR"
+
+[[bin]]
+name = "adopt-subspacer"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+hex = { workspace = true }
+base64 = "0.22"
+serde = { workspace = true }
+serde_json = { workspace = true }
+spaces_client = { workspace = true, features = ["schema"] }
+spaces_protocol = { workspace = true }
+spacedb = { workspace = true }
+subs-core = { path = "../../core" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

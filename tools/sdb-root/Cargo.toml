@@ -1,0 +1,15 @@
+[package]
+name = "sdb-root"
+version = "0.1.0"
+edition = "2021"
+description = "Print the Merkle root of a SpaceDB .sdb file"
+
+[[bin]]
+name = "sdb-root"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+hex = { workspace = true }
+spacedb = { workspace = true }
